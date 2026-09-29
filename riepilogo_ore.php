@@ -3,27 +3,54 @@ session_start();
 if (!isset($_SESSION['utente'])) { header("Location: index.php"); exit; }
 require_once 'config.php';
 
-// Estrazione sicura dell'ID utente e dell'organizzazione dalla sessione
+// Estrazione sicura dell'ID utente, organizzazione e reparto dalla sessione
 $utente_id = $_SESSION['utente_id'] ?? $_SESSION['utente']['id'] ?? $_SESSION['utente']['ID'] ?? null;
 $org_id_utente = $_SESSION['organizzazione_id'] ?? $_SESSION['utente']['organizzazione_id'] ?? $_SESSION['utente']['ORGANIZZAZIONE_ID'] ?? null;
 $reparto_id_utente = $_SESSION['reparto_id'] ?? $_SESSION['utente']['reparto_id'] ?? $_SESSION['utente']['REPARTO_ID'] ?? null;
 
 $ruolo_raw = trim($_SESSION['ruolo'] ?? $_SESSION['utente']['ruolo'] ?? $_SESSION['utente']['RUOLO'] ?? '');
 $ruolo_lower = strtolower(str_replace([' ', '-'], '_', $ruolo_raw));
+
 $is_super_admin = $_SESSION['is_super_admin'] ?? false;
 if (!$is_super_admin && ($ruolo_lower === 'super_admin' || $ruolo_lower === 'admin' || $ruolo_lower === 'superadmin')) {
     $is_super_admin = true;
 }
+
+$is_capo_personale = ($ruolo_lower === 'capo_personale' || $ruolo_lower === 'capopersonale');
+$is_coordinatore = ($ruolo_lower === 'coordinatore');
 
 if (empty($utente_id)) {
     header("Location: index.php");
     exit;
 }
 
+// Se in sessione mancano organizzazione_id o reparto_id, li recuperiamo dal DB per l'utente loggato
+if (empty($org_id_utente) || empty($reparto_id_utente)) {
+    $resUCorr = supabase_request("staging_utenti", "?id=eq.$utente_id&select=organizzazione_id,reparto_id");
+    $dataUCorr = is_array($resUCorr) ? ($resUCorr['data'] ?? $resUCorr) : [];
+    if (!empty($dataUCorr) && is_array($dataUCorr)) {
+        if (empty($org_id_utente)) {
+            $org_id_utente = $dataUCorr[0]['organizzazione_id'] ?? null;
+        }
+        if (empty($reparto_id_utente)) {
+            $reparto_id_utente = $dataUCorr[0]['reparto_id'] ?? null;
+        }
+    }
+}
+
 // Filtro Mese, Anno e Reparto
 $mese_selezionato = $_GET['mese'] ?? date('m');
 $anno_selezionato = $_GET['anno'] ?? date('Y');
-$reparto_selezionato = $_GET['reparto_id'] ?? ($is_super_admin ? '' : $reparto_id_utente);
+
+// Gestione Reparto Selezionato basata sui permessi
+$reparto_selezionato = '';
+if ($is_super_admin || $is_capo_personale) {
+    if (isset($_GET['reparto_id']) && $_GET['reparto_id'] !== '') {
+        $reparto_selezionato = $_GET['reparto_id'];
+    }
+} else {
+    $reparto_selezionato = $reparto_id_utente;
+}
 
 // Numero di giorni nel mese selezionato
 $giorni_nel_mese = cal_days_in_month(CAL_GREGORIAN, (int)$mese_selezionato, (int)$anno_selezionato);
@@ -32,17 +59,40 @@ $giorni_nel_mese = cal_days_in_month(CAL_GREGORIAN, (int)$mese_selezionato, (int
 $primo_giorno = sprintf('%04d-%02d-01 00:00:00', $anno_selezionato, $mese_selezionato);
 $ultimo_giorno = sprintf('%04d-%02d-%02d 23:59:59', $anno_selezionato, $mese_selezionato, $giorni_nel_mese);
 
-// Recupero reparti per eventuale filtro amministratore
-$reparti_query = '?select=id,nome_reparto';
-if (!$is_super_admin && !empty($org_id_utente)) {
+// Recupero reparti disponibili (filtrati per organizzazione se capo personale)
+$reparti_query = '?select=id,nome_reparto,organizzazione_id&order=nome_reparto.asc';
+if ($is_capo_personale && !empty($org_id_utente)) {
+    $reparti_query .= '&organizzazione_id=eq.' . $org_id_utente;
+} elseif (!$is_super_admin && !empty($org_id_utente)) {
     $reparti_query .= '&organizzazione_id=eq.' . $org_id_utente;
 }
 $resp_reparti = supabase_request('reparti', $reparti_query);
 $elenco_reparti = is_array($resp_reparti) ? ($resp_reparti['data'] ?? $resp_reparti) : [];
 
+// Determinazione nome struttura e reparto corrente per l'intestazione
+$nome_reparto_selezionato = ($is_super_admin || ($is_capo_personale && $reparto_selezionato === '')) ? "Tutti i Reparti della Struttura" : "Reparto non assegnato";
+$nome_struttura_corrente = "Azienda Sanitaria / Struttura";
+
+if (!empty($org_id_utente)) {
+    $res_org_filtered = supabase_request("organizzazioni", "?id=eq.$org_id_utente&select=nome_struttura");
+    $data_org_f = is_array($res_org_filtered) ? ($res_org_filtered['data'] ?? $res_org_filtered) : [];
+    if (!empty($data_org_f) && is_array($data_org_f)) {
+        $nome_struttura_corrente = $data_org_f[0]['nome_struttura'] ?? $data_org_f[0]['NOME_STRUTTURA'] ?? 'Azienda Sanitaria';
+    }
+}
+
+if ($reparto_selezionato !== '') {
+    foreach ($elenco_reparti as $rep) {
+        if ((string)$rep['id'] === (string)$reparto_selezionato) {
+            $nome_reparto_selezionato = $rep['nome_reparto'] ?? $rep['nome'] ?? 'Reparto';
+            break;
+        }
+    }
+}
+
 // 1. Recupero delle tipologie di turno dalla tabella tipologie_turno
 $tipi_turno_query = '?select=*';
-if (!$is_super_admin && !empty($org_id_utente)) {
+if (!empty($org_id_utente)) {
     $tipi_turno_query .= '&organizzazione_id=eq.' . $org_id_utente;
 }
 $resp_tipi = supabase_request('tipologie_turno', $tipi_turno_query);
@@ -87,16 +137,29 @@ if (is_array($data_tipi)) {
     }
 }
 
-// 2. Recupero dipendenti dalla tabella staging_utenti (filtrati per organizzazione e reparto)
-$dipendenti_query = '?select=id,nome,email,reparto_id';
+// 2. Recupero dipendenti dalla tabella staging_utenti con isolamento multi-tenant rigoroso
+$dipendenti_query = '?select=id,nome,email,reparto_id,ruolo,organizzazione_id';
 $filtri_dip = [];
-if (!$is_super_admin && !empty($org_id_utente)) {
-    $filtri_dip[] = 'organizzazione_id=eq.' . $org_id_utente;
-}
-if (!empty($reparto_selezionato)) {
-    $filtri_dip[] = 'reparto_id=eq.' . $reparto_selezionato;
-} elseif (!$is_super_admin && !empty($reparto_id_utente)) {
-    $filtri_dip[] = 'reparto_id=eq.' . $reparto_id_utente;
+
+if ($is_super_admin) {
+    if (!empty($reparto_selezionato)) {
+        $filtri_dip[] = 'reparto_id=eq.' . $reparto_selezionato;
+    }
+} elseif ($is_capo_personale) {
+    if (!empty($org_id_utente)) {
+        $filtri_dip[] = 'organizzazione_id=eq.' . $org_id_utente;
+    }
+    if (!empty($reparto_selezionato)) {
+        $filtri_dip[] = 'reparto_id=eq.' . $reparto_selezionato;
+    }
+} else {
+    // Coordinatore / Altri ruoli: ristretto al proprio reparto
+    if (!empty($org_id_utente)) {
+        $filtri_dip[] = 'organizzazione_id=eq.' . $org_id_utente;
+    }
+    if (!empty($reparto_id_utente)) {
+        $filtri_dip[] = 'reparto_id=eq.' . $reparto_id_utente;
+    }
 }
 
 if (!empty($filtri_dip)) {
@@ -105,7 +168,19 @@ if (!empty($filtri_dip)) {
 
 $resp_dip = supabase_request('staging_utenti', $dipendenti_query);
 $data_dip = is_array($resp_dip) ? ($resp_dip['data'] ?? $resp_dip) : [];
-$dipendenti = is_array($data_dip) ? $data_dip : [];
+$dipendenti = [];
+
+if (is_array($data_dip)) {
+    foreach ($data_dip as $c) {
+        $ruoloC_raw = trim($c['ruolo'] ?? '');
+        $ruoloC_lower = strtolower(str_replace([' ', '-'], '_', $ruoloC_raw));
+        // Escludiamo amministratori e capi personali dall'elenco operativo dei dipendenti turnisti
+        if (in_array($ruoloC_lower, ['super_admin', 'admin', 'superadmin', 'capo_personale', 'capopersonale'])) {
+            continue;
+        }
+        $dipendenti[] = $c;
+    }
+}
 
 usort($dipendenti, function($a, $b) {
     $nome_a = trim($a['nome'] ?? $a['email'] ?? '');
@@ -113,14 +188,14 @@ usort($dipendenti, function($a, $b) {
     return strcasecmp($nome_a, $nome_b);
 });
 
-// Raccogliamo gli ID dei dipendenti filtrati per prendere solo i loro turni
+// Raccogliamo gli ID dei dipendenti filtrati
 $array_id_dipendenti = array_column($dipendenti, 'id');
 
 // 3. Recupero turni/eventi dalla tabella pianificazione nel mese selezionato
 $elenco_turni = [];
 if (!empty($array_id_dipendenti)) {
     $pianificazione_query = '?data_inizio=gte.' . urlencode($primo_giorno) . '&data_inizio=lte.' . urlencode($ultimo_giorno) . '&select=*';
-    if (!$is_super_admin && !empty($org_id_utente)) {
+    if (!empty($org_id_utente)) {
         $pianificazione_query .= '&organizzazione_id=eq.' . $org_id_utente;
     }
     $resp_turni = supabase_request('pianificazione', $pianificazione_query);
@@ -155,17 +230,16 @@ $nomi_giorni_settimana = ['D', 'L', 'M', 'M', 'G', 'V', 'S'];
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Riepilogo Ore - Foglio Turni</title>
+    <title>Riepilogo Ore - PRO-TUR</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
     <style>
-        body { background-color: #f4f7f6; padding-bottom: 70px; }
-        .card { border: none; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); }
+        body { background-color: #f8fafc; padding-bottom: 70px; color: #334155; }
+        .card { border: none; border-radius: 10px; box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.05); background: #ffffff; }
         .nav-bottom { position: fixed; bottom: 0; width: 100%; height: 60px; background: white; border-top: 1px solid #ddd; display: flex; justify-content: space-around; align-items: center; z-index: 1000; }
-        .header-mobile { background: #0d6efd; color: white; padding: 20px; border-radius: 0 0 20px 20px; }
         
         /* Stile Tabella Excel */
-        .table-excel-container { width: 100%; overflow-x: auto; background: white; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); }
+        .table-excel-container { width: 100%; overflow-x: auto; background: white; border-radius: 10px; box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.05); }
         .table-excel { font-size: 0.8rem; border-collapse: collapse; white-space: nowrap; margin-bottom: 0; }
         .table-excel th, .table-excel td { border: 1px solid #dee2e6; text-align: center; vertical-align: middle; padding: 6px 4px; }
         .table-excel th.col-dipendente, .table-excel td.col-dipendente {
@@ -187,7 +261,7 @@ $nomi_giorni_settimana = ['D', 'L', 'M', 'M', 'G', 'V', 'S'];
         @media print {
             @page { size: landscape; margin: 10mm; }
             body { background-color: white !important; padding-bottom: 0 !important; font-size: 10pt; color: #000; }
-            .nav-bottom, .header-mobile, .card.mb-3, .btn, form { display: none !important; }
+            .nav-bottom, .card.mb-3, .btn, form, nav { display: none !important; }
             .print-header { display: block !important; margin-bottom: 15px; border-bottom: 2px solid #333; padding-bottom: 10px; }
             .table-excel-container { box-shadow: none !important; overflow: visible !important; border: none !important; }
             .table-excel { font-size: 0.7rem !important; width: 100% !important; }
@@ -200,27 +274,28 @@ $nomi_giorni_settimana = ['D', 'L', 'M', 'M', 'G', 'V', 'S'];
 </head>
 <body>
 
-<div class="header-mobile mb-4">
-    <div class="container d-flex justify-content-between align-items-center">
-        <div>
-            <h5 class="mb-0">Riepilogo Ore & Turni</h5>
-            <small><?php echo ($nomi_mesi[$mese_selezionato] ?? $mese_selezionato) . ' ' . $anno_selezionato; ?></small>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-4">
+        <div class="container-fluid">
+            <a class="navbar-brand fw-bold" href="dashboard.php"><i class="bi bi-hospital"></i> PRO-TUR | Riepilogo Ore</a>
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav ms-auto">
+                    <li class="nav-item"><a class="nav-link" href="dashboard.php">Dashboard</a></li>
+                    <li class="nav-item"><a class="nav-link" href="planner.php">Planner Mensile</a></li>
+                    <li class="nav-item"><a class="nav-link" href="turni.php">Assegnazione Turni</a></li>
+                    <li class="nav-item"><a class="nav-link active" href="riepilogo_ore.php">Riepilogo Ore</a></li>
+                    <li class="nav-item"><a class="nav-link text-danger" href="logout.php">Logout</a></li>
+                </ul>
+            </div>
         </div>
-        <div class="d-flex align-items-center gap-2">
-            <button onclick="window.print()" class="btn btn-light btn-sm text-primary fw-bold" title="Stampa / Esporta PDF">
-                <i class="bi bi-printer-fill me-1"></i> Stampa
-            </button>
-            <a href="planner.php" class="text-white text-decoration-none"><i class="bi bi-arrow-left fs-4"></i></a>
-        </div>
-    </div>
-</div>
+    </nav>
 
-<div class="container-fluid px-3">
+<div class="container-fluid px-4">
     <!-- Intestazione visibile solo in stampa -->
     <div class="print-header">
         <div class="d-flex justify-content-between align-items-center">
             <div>
-                <h3 class="fw-bold mb-1">PROTUR - Report Presenze e Turni</h3>
+                <h3 class="fw-bold mb-1">PRO-TUR - Report Presenze e Turni</h3>
+                <p class="mb-0 text-muted">Struttura: <strong><?php echo htmlspecialchars($nome_struttura_corrente); ?></strong> | Reparto: <strong><?php echo htmlspecialchars($nome_reparto_selezionato); ?></strong></p>
                 <p class="mb-0 text-muted">Periodo di Riferimento: <strong><?php echo ($nomi_mesi[$mese_selezionato] ?? $mese_selezionato) . ' ' . $anno_selezionato; ?></strong></p>
             </div>
             <div class="text-end">
@@ -229,10 +304,30 @@ $nomi_giorni_settimana = ['D', 'L', 'M', 'M', 'G', 'V', 'S'];
         </div>
     </div>
 
+    <!-- Header con Box Struttura / Reparto e Filtro Reparto coerente con turni.php e ferie.php -->
+    <div class="card shadow-sm mb-4 p-3">
+        <div class="row align-items-center g-3">
+            <div class="col-md-7">
+                <h2 class="mb-1 fw-bold text-dark d-flex align-items-center gap-2">
+                    <i class="bi bi-bar-chart-fill text-primary"></i> Riepilogo Ore & Turni Mensili
+                </h2>
+                <span class="small text-muted">
+                    <i class="bi bi-building"></i> Struttura: <strong class="text-dark"><?php echo htmlspecialchars($nome_struttura_corrente); ?></strong> | 
+                    Reparto: <strong class="text-dark"><?php echo htmlspecialchars($nome_reparto_selezionato); ?></strong>
+                </span>
+            </div>
+            <div class="col-md-5 text-md-end">
+                <button onclick="window.print()" class="btn btn-primary btn-sm fw-bold">
+                    <i class="bi bi-printer-fill me-1"></i> Stampa / Esporta PDF
+                </button>
+            </div>
+        </div>
+    </div>
+
     <!-- Filtri Mese, Anno e Reparto -->
-    <div class="card p-3 mb-3">
-        <form method="GET" action="turni.php" class="row g-2 align-items-end">
-            <div class="<?php echo $is_super_admin ? 'col-3' : 'col-4'; ?>">
+    <div class="card p-3 mb-4 shadow-sm">
+        <form method="GET" action="riepilogo_ore.php" class="row g-2 align-items-end">
+            <div class="<?php echo ($is_super_admin || $is_capo_personale) ? 'col-md-4' : 'col-md-6'; ?>">
                 <label for="mese" class="form-label small fw-bold">Mese</label>
                 <select name="mese" id="mese" class="form-select form-select-sm">
                     <?php foreach ($nomi_mesi as $num => $nome): ?>
@@ -242,7 +337,7 @@ $nomi_giorni_settimana = ['D', 'L', 'M', 'M', 'G', 'V', 'S'];
                     <?php endforeach; ?>
                 </select>
             </div>
-            <div class="<?php echo $is_super_admin ? 'col-3' : 'col-4'; ?>">
+            <div class="<?php echo ($is_super_admin || $is_capo_personale) ? 'col-md-4' : 'col-md-6'; ?>">
                 <label for="anno" class="form-label small fw-bold">Anno</label>
                 <select name="anno" id="anno" class="form-select form-select-sm">
                     <?php for ($a = date('Y') - 1; $a <= date('Y') + 1; $a++): ?>
@@ -253,26 +348,25 @@ $nomi_giorni_settimana = ['D', 'L', 'M', 'M', 'G', 'V', 'S'];
                 </select>
             </div>
 
-            <?php if ($is_super_admin): ?>
-            <div class="col-3">
+            <?php if ($is_super_admin || $is_capo_personale): ?>
+            <div class="col-md-4">
                 <label for="reparto_id" class="form-label small fw-bold">Reparto</label>
-                <select name="reparto_id" id="reparto_id" class="form-select form-select-sm">
-                    <option value="">Tutti i reparti</option>
-                    <?php foreach ($elenco_reparti as $rep): ?>
-                        <option value="<?php echo $rep['id']; ?>" <?php echo ($reparto_selezionato === $rep['id']) ? 'selected' : ''; ?>>
-                            <?php echo htmlspecialchars($rep['nome_reparto']); ?>
+                <select name="reparto_id" id="reparto_id" class="form-select form-select-sm" onchange="this.form.submit()">
+                    <option value="">Tutti i Reparti della Struttura</option>
+                    <?php foreach ($elenco_reparti as $rep): 
+                        $labelRep = $rep['nome_reparto'] ?? $rep['nome'] ?? 'Reparto';
+                    ?>
+                        <option value="<?php echo $rep['id']; ?>" <?php echo ($reparto_selezionato !== '' && (string)$rep['id'] === (string)$reparto_selezionato) ? 'selected' : ''; ?>>
+                            <?php echo htmlspecialchars($labelRep); ?>
                         </option>
                     <?php endforeach; ?>
                 </select>
             </div>
             <?php endif; ?>
 
-            <div class="<?php echo $is_super_admin ? 'col-3' : 'col-4'; ?> d-flex gap-2">
-                <button type="submit" class="btn btn-primary btn-sm w-100 d-flex align-items-center justify-content-center">
-                    <i class="bi bi-filter me-1"></i> Filtra
-                </button>
-                <button type="button" onclick="window.print()" class="btn btn-outline-secondary btn-sm d-flex align-items-center justify-content-center" title="Stampa report">
-                    <i class="bi bi-printer"></i>
+            <div class="col-12 text-end mt-2">
+                <button type="submit" class="btn btn-dark btn-sm fw-bold">
+                    <i class="bi bi-filter me-1"></i> Applica Filtri
                 </button>
             </div>
         </form>
@@ -280,9 +374,9 @@ $nomi_giorni_settimana = ['D', 'L', 'M', 'M', 'G', 'V', 'S'];
 
     <!-- Griglia Tabellare Stile Excel -->
     <?php if (empty($dipendenti)): ?>
-        <div class="alert alert-warning text-center">Nessun dipendente trovato per questo reparto nel sistema.</div>
+        <div class="alert alert-warning text-center shadow-sm">Nessun dipendente trovato per questo reparto o struttura nel sistema.</div>
     <?php else: ?>
-        <div class="table-excel-container mb-4">
+        <div class="table-excel-container mb-4 shadow-sm">
             <table class="table table-excel">
                 <thead>
                     <tr>
@@ -405,15 +499,17 @@ $nomi_giorni_settimana = ['D', 'L', 'M', 'M', 'G', 'V', 'S'];
             </div>
         </div>
 
-        <div class="alert alert-info small mt-2 mb-4">
-            <i class="bi bi-info-circle-fill me-1"></i> Powered by - Protur GD - Gestione integrata turni.
+        <div class="alert alert-info small mt-2 mb-4 shadow-sm">
+            <i class="bi bi-info-circle-fill me-1"></i> Powered by - PRO-TUR GD - Gestione integrata turni.
         </div>
     <?php endif; ?>
 </div>
 
-<div class="nav-bottom">
+<div class="nav-bottom no-print">
     <a href="dashboard.php" class="text-secondary text-decoration-none"><i class="bi bi-house-door fs-4"></i></a>
-    <a href="turni.php" class="text-primary text-decoration-none"><i class="bi bi-clock-history fs-4"></i></a>
+    <a href="planner.php" class="text-secondary text-decoration-none"><i class="bi bi-calendar3 fs-4"></i></a>
+    <a href="turni.php" class="text-secondary text-decoration-none"><i class="bi bi-clock-history fs-4"></i></a>
+    <a href="riepilogo_ore.php" class="text-primary text-decoration-none"><i class="bi bi-bar-chart-fill fs-4"></i></a>
     <a href="logout.php" class="text-danger text-decoration-none"><i class="bi bi-box-arrow-right fs-4"></i></a>
 </div>
 
