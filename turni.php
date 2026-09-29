@@ -92,10 +92,7 @@ function call_python_engine_genera($payload = []) {
 // Estrazione sicura dell'ID utente, dell'organizzazione e del reparto dalla sessione
 $utente_id = $_SESSION['utente_id'] ?? $_SESSION['utente']['id'] ?? $_SESSION['utente']['ID'] ?? null;
 $org_id_utente = $_SESSION['organizzazione_id'] ?? $_SESSION['utente']['organizzazione_id'] ?? $_SESSION['utente']['ORGANIZZAZIONE_ID'] ?? null;
-if (empty($org_id_utente)) { $org_id_utente = null; }
-
 $reparto_id_utente = $_SESSION['reparto_id'] ?? $_SESSION['utente']['reparto_id'] ?? $_SESSION['utente']['REPARTO_ID'] ?? null;
-if (empty($reparto_id_utente)) { $reparto_id_utente = null; }
 
 $ruolo_raw = trim($_SESSION['ruolo'] ?? $_SESSION['utente']['ruolo'] ?? $_SESSION['utente']['RUOLO'] ?? '');
 $ruolo_lower = strtolower(str_replace([' ', '-'], '_', $ruolo_raw));
@@ -113,16 +110,15 @@ if (empty($utente_id)) {
     exit;
 }
 
-// Se mancano organizzazione o reparto in sessione, li recuperiamo dal database
-if (empty($org_id_utente) || ($is_coordinatore && empty($reparto_id_utente))) {
-    $datiUserCurr = supabase_turni_request("staging_utenti?id=eq.$utente_id&select=reparto_id,organizzazione_id");
-    if (!empty($datiUserCurr) && is_array($datiUserCurr)) {
-        if (empty($reparto_id_utente)) {
-            $reparto_id_utente = !empty($datiUserCurr[0]['reparto_id']) ? $datiUserCurr[0]['reparto_id'] : null;
-        }
-        if (empty($org_id_utente)) {
-            $org_id_utente = !empty($datiUserCurr[0]['organizzazione_id']) ? $datiUserCurr[0]['organizzazione_id'] : null;
-        }
+// Carichiamo sempre i dettagli freschi dell'utente corrente da Supabase per avere org_id e reparto_id certi
+$datiUserCurr = supabase_turni_request("staging_utenti?id=eq.$utente_id&select=id,organizzazione_id,reparto_id,ruolo");
+if (!empty($datiUserCurr) && is_array($datiUserCurr)) {
+    $uInfo = $datiUserCurr[0];
+    if (empty($org_id_utente) && !empty($uInfo['organizzazione_id'])) {
+        $org_id_utente = $uInfo['organizzazione_id'];
+    }
+    if (empty($reparto_id_utente) && !empty($uInfo['reparto_id'])) {
+        $reparto_id_utente = $uInfo['reparto_id'];
     }
 }
 
@@ -143,9 +139,9 @@ if (is_array($resRep)) {
     }
 }
 
-// Nomi descrittivi da mostrare in alto
-$nomeStrutturaCorrente = $org_id_utente && isset($mappaNomiOrganizzazioni[$org_id_utente]) ? $mappaNomiOrganizzazioni[$org_id_utente] : ($is_super_admin ? 'Tutte le Strutture (Super Admin)' : 'Struttura non specificata');
-$nomeRepartoCorrente = $reparto_id_utente && isset($mappaNomiReparti[$reparto_id_utente]) ? $mappaNomiReparti[$reparto_id_utente] : ($is_capo_personale ? 'Tutti i Reparti della Struttura' : 'Reparto non specificato');
+// Se il reparto è associato ma il nome non è ancora in mappa, proviamo a cercarlo o a ricavarlo
+$nomeStrutturaCorrente = $org_id_utente && isset($mappaNomiOrganizzazioni[$org_id_utente]) ? $mappaNomiOrganizzazioni[$org_id_utente] : ($is_super_admin ? 'Tutte le Strutture (Super Admin)' : 'Struttura Principale');
+$nomeRepartoCorrente = $reparto_id_utente && isset($mappaNomiReparti[$reparto_id_utente]) ? $mappaNomiReparti[$reparto_id_utente] : ($is_capo_personale ? 'Tutti i Reparti della Struttura' : 'Reparto Assegnato');
 
 $messaggio = '';
 $tipo_alert = '';
@@ -252,6 +248,20 @@ if ($is_super_admin) {
     $resCollabReparto = supabase_turni_request("staging_utenti?reparto_id=eq." . urlencode($reparto_id_utente) . "&select=id,nome,ruolo,organizzazione_id,reparto_id,squadra&order=nome.asc");
     if (is_array($resCollabReparto)) {
         foreach ($resCollabReparto as $c) {
+            $rC_low = strtolower(str_replace([' ', '-'], '_', $c['ruolo'] ?? ''));
+            if ($rC_low === 'super_admin' || $rC_low === 'admin' || $rC_low === 'superadmin' || $rC_low === 'capo_personale' || $rC_low === 'capopersonale') {
+                continue;
+            }
+            $mappaUtenti[$c['id']] = $c;
+        }
+    }
+}
+
+// Fallback di sicurezza: se la mappa è vuota ma non siamo super admin, carichiamo per organizzazione o reparto se disponibili
+if (empty($mappaUtenti) && !empty($org_id_utente)) {
+    $resCollabOrgFallback = supabase_turni_request("staging_utenti?organizzazione_id=eq." . urlencode($org_id_utente) . "&select=id,nome,ruolo,organizzazione_id,reparto_id,squadra&order=nome.asc");
+    if (is_array($resCollabOrgFallback)) {
+        foreach ($resCollabOrgFallback as $c) {
             $rC_low = strtolower(str_replace([' ', '-'], '_', $c['ruolo'] ?? ''));
             if ($rC_low === 'super_admin' || $rC_low === 'admin' || $rC_low === 'superadmin' || $rC_low === 'capo_personale' || $rC_low === 'capopersonale') {
                 continue;
