@@ -143,6 +143,10 @@ if (is_array($resRep)) {
     }
 }
 
+// Nomi descrittivi da mostrare in alto
+$nomeStrutturaCorrente = $org_id_utente && isset($mappaNomiOrganizzazioni[$org_id_utente]) ? $mappaNomiOrganizzazioni[$org_id_utente] : ($is_super_admin ? 'Tutte le Strutture (Super Admin)' : 'Struttura non specificata');
+$nomeRepartoCorrente = $reparto_id_utente && isset($mappaNomiReparti[$reparto_id_utente]) ? $mappaNomiReparti[$reparto_id_utente] : ($is_capo_personale ? 'Tutti i Reparti della Struttura' : 'Reparto non specificato');
+
 $messaggio = '';
 $tipo_alert = '';
 $debug_log = []; 
@@ -499,7 +503,7 @@ if (is_array($assenzeMeseData)) {
         .table-turni th, .table-turni td { text-align: center; vertical-align: middle; font-size: 0.85rem; padding: 6px 4px; }
         .cella-interattiva { cursor: pointer; transition: background-color 0.2s; white-space: nowrap; }
         .cella-interattiva:hover { background-color: #e2e6ea !important; font-weight: bold; }
-        .col-operatore-sticky { position: sticky; left: 0; background-color: #ffffff; z-index: 2; text-align: left !important; min-width: 210px; font-weight: 600; }
+        .col-operatore-sticky { position: sticky; left: 0; background-color: #ffffff; z-index: 2; text-align: left !important; min-width: 170px; font-weight: 600; }
         .badge-turno {
             display: inline-block; padding: 0.25em 0.5em; font-size: 0.75rem; font-weight: 700; color: #fff;
             border-radius: 0.35rem; margin: 0 1px; text-shadow: 0 1px 1px rgba(0,0,0,0.2);
@@ -526,7 +530,26 @@ if (is_array($assenzeMeseData)) {
     </nav>
 
     <div class="container-fluid px-4">
-        <h2 class="mb-3 fw-bold">Assegnazione e Gestione Turni</h2>
+        <div class="d-flex justify-content-between align-items-center flex-wrap gap-3 mb-3">
+            <h2 class="fw-bold mb-0">Assegnazione e Gestione Turni</h2>
+            <!-- Box informativo in alto con Struttura e Reparto -->
+            <div class="d-flex gap-2">
+                <div class="bg-white px-3 py-2 rounded shadow-sm border d-flex align-items-center gap-2">
+                    <i class="bi bi-hospital text-primary fs-5"></i>
+                    <div>
+                        <div style="font-size: 0.7rem;" class="text-muted text-uppercase fw-bold">Struttura</div>
+                        <div class="small fw-bold text-dark"><?php echo htmlspecialchars($nomeStrutturaCorrente); ?></div>
+                    </div>
+                </div>
+                <div class="bg-white px-3 py-2 rounded shadow-sm border d-flex align-items-center gap-2">
+                    <i class="bi bi-door-open text-success fs-5"></i>
+                    <div>
+                        <div style="font-size: 0.7rem;" class="text-muted text-uppercase fw-bold">Reparto</div>
+                        <div class="small fw-bold text-dark"><?php echo htmlspecialchars($nomeRepartoCorrente); ?></div>
+                    </div>
+                </div>
+            </div>
+        </div>
 
         <?php if (!empty($messaggio)) { ?>
             <div class="alert alert-<?php echo $tipo_alert; ?> py-2 small" role="alert">
@@ -547,14 +570,9 @@ if (is_array($assenzeMeseData)) {
                                 <label class="form-label small fw-bold">Collaboratore</label>
                                 <select class="form-select form-select-sm" name="collaboratore_id" required>
                                     <option value="">-- Seleziona collaboratore --</option>
-                                    <?php foreach ($listaCollaboratori as $collab) { 
-                                        $cOrgId = $collab['organizzazione_id'] ?? '';
-                                        $cRepId = $collab['reparto_id'] ?? '';
-                                        $nomeOrg = $mappaNomiOrganizzazioni[$cOrgId] ?? 'Struttura N/D';
-                                        $nomeRep = $mappaNomiReparti[$cRepId] ?? 'Reparto N/D';
-                                    ?>
+                                    <?php foreach ($listaCollaboratori as $collab) { ?>
                                         <option value="<?php echo htmlspecialchars($collab['id']); ?>">
-                                            <?php echo htmlspecialchars($collab['nome']); ?> [<?php echo htmlspecialchars($collab['ruolo'] ?? 'N/D'); ?>] - <?php echo htmlspecialchars($nomeOrg); ?> / <?php echo htmlspecialchars($nomeRep); ?>
+                                            <?php echo htmlspecialchars($collab['nome']); ?> (<?php echo htmlspecialchars($collab['ruolo'] ?? 'N/D'); ?>)
                                         </option>
                                     <?php } ?>
                                 </select>
@@ -599,14 +617,9 @@ if (is_array($assenzeMeseData)) {
                                 <label class="form-label small fw-bold">Collaboratore (Opzionale)</label>
                                 <select class="form-select form-select-sm" name="collaboratore_gen">
                                     <option value="">-- Tutti i collaboratori abilitati --</option>
-                                    <?php foreach ($listaCollaboratori as $collab) { 
-                                        $cOrgId = $collab['organizzazione_id'] ?? '';
-                                        $cRepId = $collab['reparto_id'] ?? '';
-                                        $nomeOrg = $mappaNomiOrganizzazioni[$cOrgId] ?? 'Struttura N/D';
-                                        $nomeRep = $mappaNomiReparti[$cRepId] ?? 'Reparto N/D';
-                                    ?>
+                                    <?php foreach ($listaCollaboratori as $collab) { ?>
                                         <option value="<?php echo htmlspecialchars($collab['id']); ?>">
-                                            <?php echo htmlspecialchars($collab['nome']); ?> [<?php echo htmlspecialchars($collab['ruolo'] ?? 'N/D'); ?>] - <?php echo htmlspecialchars($nomeOrg); ?> / <?php echo htmlspecialchars($nomeRep); ?>
+                                            <?php echo htmlspecialchars($collab['nome']); ?> (<?php echo htmlspecialchars($collab['ruolo'] ?? 'N/D'); ?>)
                                         </option>
                                     <?php } ?>
                                 </select>
@@ -682,7 +695,7 @@ if (is_array($assenzeMeseData)) {
                     <table class="table table-bordered table-turni mb-0">
                         <thead class="table-dark">
                             <tr>
-                                <th class="col-operatore-sticky bg-dark text-white">Operatore / Struttura / Reparto</th>
+                                <th class="col-operatore-sticky bg-dark text-white">Operatore</th>
                                 <?php for ($g = 1; $g <= $giorni_nel_mese; $g++): 
                                     $giornoStamp = sprintf('%s-%02d', $mese_selezionato, $g);
                                     $numGiornoSettimana = date('N', strtotime($giornoStamp));
@@ -702,22 +715,14 @@ if (is_array($assenzeMeseData)) {
                             <?php } else { ?>
                                 <?php foreach ($listaCollaboratori as $collab) { 
                                     $uId = $collab['id'];
-                                    $cOrgId = $collab['organizzazione_id'] ?? '';
-                                    $cRepId = $collab['reparto_id'] ?? '';
-                                    $nomeOrg = $mappaNomiOrganizzazioni[$cOrgId] ?? 'Struttura N/D';
-                                    $nomeRep = $mappaNomiReparti[$cRepId] ?? 'Reparto N/D';
                                 ?>
                                     <tr>
                                         <td class="col-operatore-sticky">
-                                            <div class="text-truncate fw-bold" style="max-width: 200px;" title="<?php echo htmlspecialchars($collab['nome']); ?>">
-                                                <i class="bi bi-person-fill text-secondary"></i> <?php echo htmlspecialchars($collab['nome']); ?>
+                                            <div class="text-truncate" style="max-width: 170px;" title="<?php echo htmlspecialchars($collab['nome']); ?>">
+                                                <?php echo htmlspecialchars($collab['nome']); ?>
                                             </div>
-                                            <div style="font-size: 0.7rem; color: #495057;">
-                                                <span class="badge bg-light text-dark border"><?php echo htmlspecialchars($collab['ruolo'] ?? 'N/D'); ?></span>
-                                            </div>
-                                            <div style="font-size: 0.68rem; color: #6c757d;" class="text-truncate mt-1" title="Struttura: <?php echo htmlspecialchars($nomeOrg); ?> | Reparto: <?php echo htmlspecialchars($nomeRep); ?>">
-                                                <i class="bi bi-hospital text-primary"></i> <?php echo htmlspecialchars($nomeOrg); ?><br>
-                                                <i class="bi bi-door-open text-success"></i> <?php echo htmlspecialchars($nomeRep); ?>
+                                            <div style="font-size: 0.7rem; font-weight: normal; color: #6c757d;">
+                                                <?php echo htmlspecialchars($collab['ruolo'] ?? 'N/D'); ?>
                                             </div>
                                         </td>
                                         <?php for ($g = 1; $g <= $giorni_nel_mese; $g++): 
