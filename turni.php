@@ -49,7 +49,7 @@ function supabase_turni_request($endpoint, $method = 'GET', $data = null) {
     return $method === 'GET' ? [] : false;
 }
 
-// Funzione per comunicare con il microservizio Python su Render puntando all'endpoint /genera-turni
+// Funzione per comunicare con il microservizio Python su Render
 function call_python_engine_genera($payload = []) {
     $url = 'https://turno-med-engine.onrender.com/genera-turni';
 
@@ -68,8 +68,6 @@ function call_python_engine_genera($payload = []) {
     $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     $error = curl_error($ch);
     curl_close($ch);
-
-    error_log("DEBUG PYTHON - HTTP Code: $httpCode | Risposta Grezza: " . $response);
 
     if ($error) {
         return ['success' => false, 'error' => "Errore cURL: " . $error];
@@ -111,9 +109,26 @@ if (empty($utente_id)) {
     exit;
 }
 
-// 2. Recupero di tutti i reparti per popolare il menu a tendina o riferimento
+// Se in sessione manca l'organizzazione_id o il reparto_id, li recuperiamo direttamente dal DB per l'utente loggato
+if (empty($org_id_utente) || empty($reparto_id_utente)) {
+    $resUCorr = supabase_turni_request("staging_utenti?id=eq.$utente_id&select=organizzazione_id,reparto_id");
+    if (!empty($resUCorr) && is_array($resUCorr)) {
+        if (empty($org_id_utente)) {
+            $org_id_utente = $resUCorr[0]['organizzazione_id'] ?? null;
+        }
+        if (empty($reparto_id_utente)) {
+            $reparto_id_utente = $resUCorr[0]['reparto_id'] ?? null;
+        }
+    }
+}
+
+// 2. Recupero di tutti i reparti (filtrati per organizzazione se è un capo personale)
 $reparti_disponibili = [];
-$resReparti = supabase_turni_request("reparti?select=id,nome_reparto&order=nome_reparto.asc");
+$urlReparti = "reparti?select=id,nome_reparto,organizzazione_id&order=nome_reparto.asc";
+if ($is_capo_personale && !empty($org_id_utente)) {
+    $urlReparti = "reparti?organizzazione_id=eq.$org_id_utente&select=id,nome_reparto,organizzazione_id&order=nome_reparto.asc";
+}
+$resReparti = supabase_turni_request($urlReparti);
 if (is_array($resReparti) && !isset($resReparti['error'])) {
     $reparti_disponibili = $resReparti;
 }
@@ -123,20 +138,16 @@ $reparto_selezionato = '';
 if ($is_super_admin || $is_capo_personale) {
     if (isset($_GET['reparto_id']) && $_GET['reparto_id'] !== '') {
         $reparto_selezionato = $_GET['reparto_id'];
-    } elseif (!empty($reparto_id_utente)) {
-        $reparto_selezionato = $reparto_id_utente;
     }
 } else {
     $reparto_selezionato = $reparto_id_utente;
 }
 
 // 4. Determinazione del nome del reparto e della struttura da mostrare a schermo
-$nome_reparto_selezionato = ($is_super_admin || ($is_capo_personale && $reparto_selezionato === '')) ? "Tutti i Reparti" : "Reparto non assegnato";
+$nome_reparto_selezionato = ($is_super_admin || ($is_capo_personale && $reparto_selezionato === '')) ? "Tutti i Reparti della Struttura" : "Reparto non assegnato";
 $nome_struttura_corrente = "Azienda Sanitaria / Struttura";
 
 if (!empty($org_id_utente)) {
-    $res_org = supabase_turni_request('organizzazioni', 'GET');
-    // Cerca manualmente o tramite filtro se supportato
     $res_org_filtered = supabase_turni_request("organizzazioni?id=eq.$org_id_utente&select=nome_struttura");
     if (!empty($res_org_filtered) && is_array($res_org_filtered)) {
         $nome_struttura_corrente = $res_org_filtered[0]['nome_struttura'] ?? $res_org_filtered[0]['NOME_STRUTTURA'] ?? 'Azienda Sanitaria';
@@ -148,12 +159,6 @@ if ($reparto_selezionato !== '') {
         if ((string)$rep['id'] === (string)$reparto_selezionato) {
             $nome_reparto_selezionato = $rep['nome_reparto'] ?? $rep['nome'] ?? 'Reparto';
             break;
-        }
-    }
-    if ($nome_reparto_selezionato === "Reparto non assegnato") {
-        $resSingleRep = supabase_turni_request("reparti?id=eq." . urlencode($reparto_selezionato) . "&select=nome_reparto");
-        if (is_array($resSingleRep) && count($resSingleRep) > 0) {
-            $nome_reparto_selezionato = $resSingleRep[0]['nome_reparto'] ?? $resSingleRep[0]['nome'] ?? 'Reparto';
         }
     }
 }
@@ -231,21 +236,45 @@ function verificaVincoliTurno($utente_id, $data_str, $nuovo_codice, $turno_esclu
     return true;
 }
 
-// COSTRUZIONE MAPPA UTENTI CON FILTRO MULTI-TENANT E REPARTO
+// COSTRUZIONE MAPPA UTENTI CON ISOLAMENTO MULTI-TENANT RIGOROSO
 $mappaUtenti = [];
-$resCollab = supabase_turni_request("staging_utenti?select=id,nome,ruolo,qualifica,reparto_id,squadra&order=nome.asc");
 
-if (is_array($resCollab) && !isset($resCollab['error'])) {
-    foreach ($resCollab as $c) {
-        $rC_low = strtolower(str_replace([' ', '-'], '_', $c['ruolo'] ?? ''));
-        if (in_array($rC_low, ['super_admin', 'admin', 'superadmin', 'capo_personale', 'capopersonale'])) {
-            continue;
+if ($is_super_admin) {
+    // Super admin vede tutti
+    $urlUtenti = "staging_utenti?select=id,nome,ruolo,qualifica,organizzazione_id,reparto_id,squadra&order=nome.asc";
+    if ($reparto_selezionato !== '') {
+        $urlUtenti = "staging_utenti?reparto_id=eq." . urlencode($reparto_selezionato) . "&select=id,nome,ruolo,qualifica,organizzazione_id,reparto_id,squadra&order=nome.asc";
+    }
+} elseif ($is_capo_personale) {
+    // Capo Personale: FILTRO TASSATIVO SULL'ORGANIZZAZIONE_ID (Struttura A)
+    if (!empty($org_id_utente)) {
+        if ($reparto_selezionato !== '') {
+            $urlUtenti = "staging_utenti?organizzazione_id=eq.$org_id_utente&reparto_id=eq." . urlencode($reparto_selezionato) . "&select=id,nome,ruolo,qualifica,organizzazione_id,reparto_id,squadra&order=nome.asc";
+        } else {
+            $urlUtenti = "staging_utenti?organizzazione_id=eq.$org_id_utente&select=id,nome,ruolo,qualifica,organizzazione_id,reparto_id,squadra&order=nome.asc";
         }
-        $repCollabId = $c['reparto_id'] ?? '';
-        if (!$is_super_admin && $reparto_selezionato !== '' && (string)$repCollabId !== (string)$reparto_selezionato) {
-            continue;
+    } else {
+        $urlUtenti = ""; // Nessuna organizzazione -> nessun utente
+    }
+} else {
+    // Coordinatore o altro ruolo: filtra per reparto
+    if (!empty($reparto_id_utente)) {
+        $urlUtenti = "staging_utenti?reparto_id=eq.$reparto_id_utente&select=id,nome,ruolo,qualifica,organizzazione_id,reparto_id,squadra&order=nome.asc";
+    } else {
+        $urlUtenti = "";
+    }
+}
+
+if (!empty($urlUtenti)) {
+    $resCollab = supabase_turni_request($urlUtenti);
+    if (is_array($resCollab) && !isset($resCollab['error'])) {
+        foreach ($resCollab as $c) {
+            $rC_low = strtolower(str_replace([' ', '-'], '_', $c['ruolo'] ?? ''));
+            if (in_array($rC_low, ['super_admin', 'admin', 'superadmin', 'capo_personale', 'capopersonale'])) {
+                continue;
+            }
+            $mappaUtenti[$c['id']] = $c;
         }
-        $mappaUtenti[$c['id']] = $c;
     }
 }
 
@@ -265,7 +294,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($checkVincoli === true) {
                 $datiPost = [
                     'organizzazione_id' => !empty($org_id_utente) ? $org_id_utente : null,
-                    'reparto_id' => !empty($reparto_id_utente) ? $reparto_id_utente : null,
+                    'reparto_id' => !empty($mappaUtenti[$utente_cell]['reparto_id']) ? $mappaUtenti[$utente_cell]['reparto_id'] : null,
                     'utente_id' => $utente_cell,
                     'data_inizio' => $data_cell . ' 00:00:00+00',
                     'data_fine' => $data_cell . ' 23:59:59+00',
@@ -343,7 +372,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($checkVincoli === true) {
                 $datiPianificazione = [
                     'organizzazione_id' => !empty($org_id_utente) ? $org_id_utente : null,
-                    'reparto_id' => !empty($reparto_id_utente) ? $reparto_id_utente : null,
+                    'reparto_id' => !empty($mappaUtenti[$collaboratore_selezionato]['reparto_id']) ? $mappaUtenti[$collaboratore_selezionato]['reparto_id'] : null,
                     'utente_id' => $collaboratore_selezionato,
                     'data_inizio' => $data_inizio . ' 00:00:00+00',
                     'data_fine' => $data_inizio . ' 23:59:59+00',
@@ -376,7 +405,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         if (!empty($data_inizio_gen) && !empty($data_fine_gen)) {
             $clean_org_id = (!empty($org_id_utente)) ? $org_id_utente : null;
-            $clean_rep_id = (!empty($reparto_id_utente)) ? $reparto_id_utente : null;
+            $clean_rep_id = (!empty($reparto_selezionato)) ? $reparto_selezionato : null;
             $clean_user_id = (!empty($collaboratore_gen) && isset($mappaUtenti[$collaboratore_gen])) ? $collaboratore_gen : null;
             $clean_turno_partenza = (!empty($turno_partenza)) ? $turno_partenza : null;
 
@@ -540,7 +569,7 @@ $nomeMeseCorrente = $mesiNomi[$mese_selezionato] ?? '';
                     <form method="GET" action="turni.php" class="d-inline-flex gap-2 align-items-center">
                         <?php if (($is_super_admin || $is_capo_personale) && !empty($reparti_disponibili)) { ?>
                             <select name="reparto_id" class="form-select form-select-sm" onchange="this.form.submit()">
-                                <option value="">Tutti i Reparti</option>
+                                <option value="">Tutti i Reparti della Struttura</option>
                                 <?php foreach ($reparti_disponibili as $rep) { 
                                     $labelRep = $rep['nome_reparto'] ?? $rep['nome'] ?? 'Reparto';
                                 ?>
