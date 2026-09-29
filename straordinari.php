@@ -48,6 +48,7 @@ function supabase_straordinari_request($endpoint, $method = 'GET', $data = null)
     return $method === 'GET' ? [] : false;
 }
 
+// 1. Estrazione sicura dei dati dalla sessione
 $utente_id = $_SESSION['utente_id'] ?? $_SESSION['utente']['id'] ?? $_SESSION['utente']['ID'] ?? null;
 $org_id_utente = $_SESSION['organizzazione_id'] ?? $_SESSION['utente']['organizzazione_id'] ?? null;
 $reparto_id_utente = $_SESSION['reparto_id'] ?? $_SESSION['utente']['reparto_id'] ?? null;
@@ -61,21 +62,63 @@ if (!$is_super_admin && ($ruolo_lower === 'super_admin' || $ruolo_lower === 'adm
 }
 $is_capo_personale = ($ruolo_lower === 'capo_personale' || $ruolo_lower === 'capopersonale');
 
-if (empty($reparto_id_utente) && !empty($utente_id)) {
+if (empty($utente_id)) {
+    header("Location: index.php");
+    exit;
+}
+
+if (empty($org_id_utente) || empty($reparto_id_utente)) {
     $datiUserCurr = supabase_straordinari_request("staging_utenti?id=eq.$utente_id&select=reparto_id,organizzazione_id,matricola");
     if (!empty($datiUserCurr) && is_array($datiUserCurr)) {
-        $reparto_id_utente = !empty($datiUserCurr[0]['reparto_id']) ? $datiUserCurr[0]['reparto_id'] : null;
+        if (empty($reparto_id_utente)) {
+            $reparto_id_utente = !empty($datiUserCurr[0]['reparto_id']) ? $datiUserCurr[0]['reparto_id'] : null;
+        }
         if (empty($org_id_utente)) {
             $org_id_utente = !empty($datiUserCurr[0]['organizzazione_id']) ? $datiUserCurr[0]['organizzazione_id'] : null;
         }
     }
 }
 
-$mappaReparti = [];
-$resReparti = supabase_straordinari_request("reparti?select=id,nome_reparto");
+// 2. Recupero reparti disponibili (filtrati per organizzazione se capo personale)
+$reparti_disponibili = [];
+$urlReparti = "reparti?select=id,nome_reparto,organizzazione_id&order=nome_reparto.asc";
+if ($is_capo_personale && !empty($org_id_utente)) {
+    $urlReparti = "reparti?organizzazione_id=eq.$org_id_utente&select=id,nome_reparto,organizzazione_id&order=nome_reparto.asc";
+}
+$resReparti = supabase_straordinari_request($urlReparti);
 if (is_array($resReparti)) {
     foreach ($resReparti as $r) {
-        $mappaReparti[$r['id']] = $r['nome_reparto'];
+        $reparti_disponibili[] = $r;
+    }
+}
+
+// 3. Gestione Reparto Selezionato
+$reparto_selezionato = '';
+if ($is_super_admin || $is_capo_personale) {
+    if (isset($_GET['reparto_id']) && $_GET['reparto_id'] !== '') {
+        $reparto_selezionato = $_GET['reparto_id'];
+    }
+} else {
+    $reparto_selezionato = $reparto_id_utente;
+}
+
+// 4. Determinazione nome struttura e reparto
+$nome_reparto_selezionato = ($is_super_admin || ($is_capo_personale && $reparto_selezionato === '')) ? "Tutti i Reparti della Struttura" : "Reparto non assegnato";
+$nome_struttura_corrente = "Azienda Sanitaria / Struttura";
+
+if (!empty($org_id_utente)) {
+    $res_org_filtered = supabase_straordinari_request("organizzazioni?id=eq.$org_id_utente&select=nome_struttura");
+    if (!empty($res_org_filtered) && is_array($res_org_filtered)) {
+        $nome_struttura_corrente = $res_org_filtered[0]['nome_struttura'] ?? $res_org_filtered[0]['NOME_STRUTTURA'] ?? 'Azienda Sanitaria';
+    }
+}
+
+if ($reparto_selezionato !== '') {
+    foreach ($reparti_disponibili as $rep) {
+        if ((string)$rep['id'] === (string)$reparto_selezionato) {
+            $nome_reparto_selezionato = $rep['nome_reparto'] ?? $rep['nome'] ?? 'Reparto';
+            break;
+        }
     }
 }
 
@@ -117,7 +160,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['azione']) && $_POST['
 
         $datiInsert = [
             'organizzazione_id' => !empty($org_id_utente) ? $org_id_utente : null,
-            'reparto_id' => !empty($reparto_id_utente) ? $reparto_id_utente : null,
+            'reparto_id' => !empty($reparto_selezionato) ? $reparto_selezionato : (!empty($reparto_id_utente) ? $reparto_id_utente : null),
             'utente_id' => $utente_selezionato,
             'data_straordinario' => $data_inizio,
             'data_fine_straordinario' => $data_fine,
@@ -144,25 +187,57 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['azione']) && $_POST['
     }
 }
 
+// COSTRUZIONE MAPPA UTENTI CON ISOLAMENTO MULTI-TENANT RIGOROSO
 $listaCollaboratori = [];
-$queryCollab = "staging_utenti?select=id,nome,ruolo,qualifica,reparto_id,matricola&order=nome.asc";
-if (!$is_super_admin && !$is_capo_personale && !empty($reparto_id_utente)) {
-    $queryCollab = "staging_utenti?reparto_id=eq." . urlencode($reparto_id_utente) . "&select=id,nome,ruolo,qualifica,reparto_id,matricola&order=nome.asc";
+
+if ($is_super_admin) {
+    $queryCollab = "staging_utenti?select=id,nome,ruolo,qualifica,organizzazione_id,reparto_id,matricola&order=nome.asc";
+    if ($reparto_selezionato !== '') {
+        $queryCollab = "staging_utenti?reparto_id=eq." . urlencode($reparto_selezionato) . "&select=id,nome,ruolo,qualifica,organizzazione_id,reparto_id,matricola&order=nome.asc";
+    }
+} elseif ($is_capo_personale) {
+    if (!empty($org_id_utente)) {
+        if ($reparto_selezionato !== '') {
+            $queryCollab = "staging_utenti?organizzazione_id=eq.$org_id_utente&reparto_id=eq." . urlencode($reparto_selezionato) . "&select=id,nome,ruolo,qualifica,organizzazione_id,reparto_id,matricola&order=nome.asc";
+        } else {
+            $queryCollab = "staging_utenti?organizzazione_id=eq.$org_id_utente&select=id,nome,ruolo,qualifica,organizzazione_id,reparto_id,matricola&order=nome.asc";
+        }
+    } else {
+        $queryCollab = "";
+    }
+} else {
+    if (!empty($reparto_id_utente)) {
+        $queryCollab = "staging_utenti?reparto_id=eq.$reparto_id_utente&select=id,nome,ruolo,qualifica,organizzazione_id,reparto_id,matricola&order=nome.asc";
+    } else {
+        $queryCollab = "";
+    }
 }
-$resCollab = supabase_straordinari_request($queryCollab);
-if (is_array($resCollab)) {
-    foreach ($resCollab as $c) {
-        $listaCollaboratori[$c['id']] = $c;
+
+if (!empty($queryCollab)) {
+    $resCollab = supabase_straordinari_request($queryCollab);
+    if (is_array($resCollab)) {
+        foreach ($resCollab as $c) {
+            $ruoloC_raw = trim($c['ruolo'] ?? '');
+            $ruoloC_lower = strtolower(str_replace([' ', '-'], '_', $ruoloC_raw));
+            if (in_array($ruoloC_lower, ['super_admin', 'admin', 'superadmin', 'capo_personale', 'capopersonale'])) {
+                continue;
+            }
+            $listaCollaboratori[$c['id']] = $c;
+        }
     }
 }
 
 $idsUtentiFiltro = array_keys($listaCollaboratori);
-$queryStraordinari = "straordinari?select=*&order=data_straordinario.desc";
-if (!$is_super_admin && !$is_capo_personale && !empty($idsUtentiFiltro)) {
-    $queryStraordinari = "straordinari?utente_id=in.(" . implode(',', $idsUtentiFiltro) . ")&select=*&order=data_straordinario.desc";
+$elencoStraordinari = [];
+
+if (!empty($idsUtentiFiltro)) {
+    $inQueryList = '(' . implode(',', $idsUtentiFiltro) . ')';
+    $queryStraordinari = "straordinari?utente_id=in." . urlencode($inQueryList) . "&select=*&order=data_straordinario.desc";
+    $resStr = supabase_straordinari_request($queryStraordinari);
+    if (is_array($resStr)) {
+        $elencoStraordinari = $resStr;
+    }
 }
-$elencoStraordinari = supabase_straordinari_request($queryStraordinari);
-if (!is_array($elencoStraordinari)) { $elencoStraordinari = []; }
 
 // Elaborazione statistiche per dipendente e regime
 $statisticheDipendenti = [];
@@ -194,6 +269,15 @@ foreach ($elencoStraordinari as $st) {
         $statisticheDipendenti[$uid]['ore_altre'] += $ore;
     }
 }
+
+// Mappa reparti per nomi
+$mappaReparti = [];
+$resRepAll = supabase_straordinari_request("reparti?select=id,nome_reparto");
+if (is_array($resRepAll)) {
+    foreach ($resRepAll as $r) {
+        $mappaReparti[$r['id']] = $r['nome_reparto'];
+    }
+}
 ?>
 <!DOCTYPE html>
 <html lang="it">
@@ -204,8 +288,8 @@ foreach ($elencoStraordinari as $st) {
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
     <style>
-        body { background-color: #f4f7f6; padding-bottom: 70px; }
-        .card { border: none; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); }
+        body { background-color: #f8fafc; padding-bottom: 70px; color: #334155; }
+        .card { border: none; border-radius: 10px; box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.05); background: #ffffff; }
         
         @media print {
             @page {
@@ -270,7 +354,6 @@ foreach ($elencoStraordinari as $st) {
             padding-left: 90px;
             padding-right: 90px;
         }
-        /* Stili per l'autocompletamento nel form */
         #suggerimenti-box {
             position: absolute;
             z-index: 1000;
@@ -295,15 +378,16 @@ foreach ($elencoStraordinari as $st) {
         }
     </style>
 </head>
-<body class="bg-light">
+<body>
 
     <nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-4 no-print">
         <div class="container-fluid">
-            <a class="navbar-brand fw-bold" href="dashboard.php">PRO-TUR | Gestione Turni</a>
+            <a class="navbar-brand fw-bold" href="dashboard.php"><i class="bi bi-hospital"></i> PRO-TUR | Gestione Straordinari</a>
             <div class="collapse navbar-collapse" id="navbarNav">
                 <ul class="navbar-nav ms-auto">
                     <li class="nav-item"><a class="nav-link" href="dashboard.php">Dashboard</a></li>
-                    <li class="nav-item"><a class="nav-link" href="turni.php">Turni</a></li>
+                    <li class="nav-item"><a class="nav-link" href="planner.php">Planner Mensile</a></li>
+                    <li class="nav-item"><a class="nav-link" href="turni.php">Assegnazione Turni</a></li>
                     <li class="nav-item"><a class="nav-link active" href="straordinari.php">Straordinari</a></li>
                     <li class="nav-item"><a class="nav-link text-danger" href="logout.php">Logout</a></li>
                 </ul>
@@ -311,23 +395,51 @@ foreach ($elencoStraordinari as $st) {
         </div>
     </nav>
 
-    <div class="container px-4 no-print">
-        <h2 class="mb-3 fw-bold"><i class="bi bi-file-earmark-text-fill"></i> Gestione e Modulo Straordinari</h2>
+    <div class="container-fluid px-4 no-print">
+        
+        <!-- Header con Box Reparto / Struttura coerente con turni.php e ferie.php -->
+        <div class="card shadow-sm mb-4 p-3">
+            <div class="row align-items-center g-3">
+                <div class="col-md-7">
+                    <h2 class="mb-1 fw-bold text-dark d-flex align-items-center gap-2">
+                        <i class="bi bi-file-earmark-text-fill text-primary"></i> Gestione e Modulo Straordinari
+                    </h2>
+                    <span class="small text-muted">
+                        <i class="bi bi-building"></i> Struttura: <strong class="text-dark"><?php echo htmlspecialchars($nome_struttura_corrente); ?></strong> | 
+                        Reparto: <strong class="text-dark"><?php echo htmlspecialchars($nome_reparto_selezionato); ?></strong>
+                    </span>
+                </div>
+                <div class="col-md-5 text-md-end">
+                    <?php if (($is_super_admin || $is_capo_personale) && !empty($reparti_disponibili)) { ?>
+                        <form method="GET" action="straordinari.php" class="d-inline-block">
+                            <select name="reparto_id" class="form-select form-select-sm" onchange="this.form.submit()">
+                                <option value="">Tutti i Reparti della Struttura</option>
+                                <?php foreach ($reparti_disponibili as $rep) { 
+                                    $labelRep = $rep['nome_reparto'] ?? $rep['nome'] ?? 'Reparto';
+                                ?>
+                                    <option value="<?php echo $rep['id']; ?>" <?php echo ($reparto_selezionato !== '' && (string)$rep['id'] === (string)$reparto_selezionato) ? 'selected' : ''; ?>><?php echo htmlspecialchars($labelRep); ?></option>
+                                <?php } ?>
+                            </select>
+                        </form>
+                    <?php } ?>
+                </div>
+            </div>
+        </div>
 
         <?php if (!empty($messaggio)) { ?>
-            <div class="alert alert-<?php echo $tipo_alert; ?> py-2 small" role="alert">
+            <div class="alert alert-<?php echo $tipo_alert; ?> py-2 small shadow-sm" role="alert">
                 <?php echo htmlspecialchars($messaggio); ?>
             </div>
         <?php } ?>
 
         <div class="row mb-4">
             <div class="col-lg-5 mb-3 mb-lg-0">
-                <div class="card h-100 bg-white">
-                    <div class="card-header bg-white py-3">
+                <div class="card h-100 bg-white p-3">
+                    <div class="card-header bg-white pb-2 px-0 border-bottom">
                         <h5 class="mb-0 fs-6 fw-bold"><i class="bi bi-plus-circle"></i> Compila Modulo Straordinario</h5>
                     </div>
-                    <div class="card-body">
-                        <form method="POST" action="straordinari.php" id="formStraordinario">
+                    <div class="card-body px-0">
+                        <form method="POST" action="straordinari.php?reparto_id=<?php echo urlencode($reparto_selezionato); ?>" id="formStraordinario">
                             <input type="hidden" name="azione" value="nuovo_straordinario">
                             <input type="hidden" name="utente_id" id="utente_id_hidden" required>
                             
@@ -378,11 +490,11 @@ foreach ($elencoStraordinari as $st) {
             </div>
 
             <div class="col-lg-7">
-                <div class="card h-100 bg-white">
-                    <div class="card-header bg-white py-3">
-                        <h5 class="mb-0 fs-6 fw-bold"><i class="bi bi-list-check"></i> Storico Moduli Straordinario (Reparto)</h5>
+                <div class="card h-100 bg-white p-3">
+                    <div class="card-header bg-white pb-2 px-0 border-bottom">
+                        <h5 class="mb-0 fs-6 fw-bold"><i class="bi bi-list-check"></i> Storico Moduli Straordinario</h5>
                     </div>
-                    <div class="card-body p-0">
+                    <div class="card-body px-0">
                         <div class="table-responsive" style="max-height: 400px;">
                             <table class="table table-striped table-hover mb-0 small align-middle">
                                 <thead class="table-dark">
@@ -419,7 +531,7 @@ foreach ($elencoStraordinari as $st) {
                                         <?php endforeach; ?>
                                     <?php else: ?>
                                         <tr>
-                                            <td colspan="6" class="text-center text-muted py-4">Nessun modulo straordinario registrato per questo reparto.</td>
+                                            <td colspan="6" class="text-center text-muted py-4">Nessun modulo straordinario registrato per i filtri selezionati.</td>
                                         </tr>
                                     <?php endif; ?>
                                 </tbody>
@@ -433,15 +545,14 @@ foreach ($elencoStraordinari as $st) {
         <!-- RIEPILOGO ORE PER DIPENDENTE E REGIME CON FILTRO DI RICERCA -->
         <div class="row mb-5">
             <div class="col-12">
-                <div class="card bg-white">
-                    <div class="card-header bg-white py-3 d-flex flex-column flex-md-row justify-content-between align-items-center gap-2">
-                        <h5 class="mb-0 fs-6 fw-bold"><i class="bi bi-bar-chart-fill"></i> Riepilogo straordinario per dipendente.</h5>
-                        <!-- Barra di ricerca rapida per il riepilogo ore -->
+                <div class="card bg-white p-3">
+                    <div class="card-header bg-white pb-2 px-0 border-bottom d-flex flex-column flex-md-row justify-content-between align-items-center gap-2">
+                        <h5 class="mb-0 fs-6 fw-bold"><i class="bi bi-bar-chart-fill"></i> Riepilogo straordinario per dipendente</h5>
                         <div style="width: 300px;">
                             <input type="text" class="form-control form-control-sm" id="filtroTabellaOre" placeholder="Filtra per nome dipendente..." autocomplete="off">
                         </div>
                     </div>
-                    <div class="card-body p-0">
+                    <div class="card-body px-0">
                         <div class="table-responsive">
                             <table class="table table-bordered table-striped mb-0 small align-middle" id="tabellaRiepilogoOre">
                                 <thead class="table-secondary">
@@ -572,7 +683,6 @@ foreach ($elencoStraordinari as $st) {
         const mappaRepartiJs = <?php echo json_encode($mappaReparti); ?>;
         const listaCollaboratoriJs = <?php echo json_encode(array_values($listaCollaboratori)); ?>;
 
-        // Autocompletamento per inserire il modulo straordinario
         const inputRicerca = document.getElementById('inputRicercaOperatore');
         const boxSuggerimenti = document.getElementById('suggerimenti-box');
         const inputUtenteIdHidden = document.getElementById('utente_id_hidden');
@@ -621,15 +731,13 @@ foreach ($elencoStraordinari as $st) {
             }
         });
 
-        // Filtro di ricerca in tempo reale per la tabella del Riepilogo Ore
         const inputFiltroOre = document.getElementById('filtroTabellaOre');
         if (inputFiltroOre) {
             inputFiltroOre.addEventListener('input', function() {
                 const valFiltro = this.value.toLowerCase().trim();
                 const righe = document.querySelectorAll('.riga-dipendente-ore');
-
                 righe.forEach(riga => {
-                    const testoNome = riga.querySelector('.nome-dipendente-testo').textContent.toLowerCase();
+                    const testoNome = riga.querySelector('.nome-dipendente-testo').innerText.toLowerCase();
                     if (testoNome.includes(valFiltro)) {
                         riga.style.display = '';
                     } else {
@@ -640,44 +748,47 @@ foreach ($elencoStraordinari as $st) {
         }
 
         function apriStampaModulo(st, uInfo) {
-            document.querySelector('.container.px-4').style.display = 'none';
+            document.querySelector('.container-fluid.px-4.no-print').style.display = 'none';
             document.getElementById('wrapperModuloStampa').style.display = 'block';
 
             document.getElementById('lbl_protocollo').innerText = st.numero_protocollo || '---';
-            document.getElementById('lbl_data_redazione').innerText = st.created_at ? new Date(st.created_at).toLocaleString() : new Date().toLocaleString();
-            document.getElementById('lbl_nome_dipendente').innerText = uInfo.nome || 'Operatore';
             
-            let matricolaVal = 'N/D';
-            if (uInfo.matricola !== null && uInfo.matricola !== undefined && String(uInfo.matricola).trim() !== '') {
-                matricolaVal = uInfo.matricola;
-            }
-            document.getElementById('lbl_matricola').innerText = matricolaVal;
-            
-            let repId = uInfo.reparto_id || st.reparto_id;
-            let nomeRepartoTrovato = mappaRepartiJs[repId] || 'SERVIZI INTRAOSPEDALIERI';
-            document.getElementById('lbl_reparto').innerText = nomeRepartoTrovato;
+            const dataRedaz = st.created_at ? new Date(st.created_at).toLocaleDateString('it-IT') : new Date().toLocaleDateString('it-IT');
+            document.getElementById('lbl_data_redazione').innerText = dataRedaz;
+            document.getElementById('lbl_data_firma').innerText = dataRedaz;
 
-            let qualificaFormale = uInfo.qualifica && uInfo.qualifica.trim() !== '' ? uInfo.qualifica : (uInfo.ruolo || 'CPSI');
-            document.getElementById('lbl_profilo').innerText = qualificaFormale;
+            document.getElementById('lbl_nome_dipendente').innerText = uInfo.nome || '---';
+            document.getElementById('lbl_matricola').innerText = uInfo.matricola || 'N/D';
             
-            let dataInizioStr = st.data_straordinario;
-            let dataFineStr = st.data_fine_straordinario || st.data_straordinario;
+            let nomeRepartoStampa = "Reparto Ospedaliero";
+            if (st.reparto_id && mappaRepartiJs[st.reparto_id]) {
+                nomeRepartoStampa = mappaRepartiJs[st.reparto_id];
+            } else if (uInfo.reparto_id && mappaRepartiJs[uInfo.reparto_id]) {
+                nomeRepartoStampa = mappaRepartiJs[uInfo.reparto_id];
+            }
+            document.getElementById('lbl_reparto').innerText = nomeRepartoStampa;
+            document.getElementById('lbl_profilo').innerText = uInfo.qualifica || uInfo.ruolo || 'CPSI';
 
             document.getElementById('lbl_turno').innerText = st.turno_riferimento || 'N';
-            document.getElementById('lbl_giorno_1').innerText = dataInizioStr;
-            document.getElementById('lbl_giorno_2').innerText = dataFineStr;
-            document.getElementById('lbl_ora_inizio').innerText = st.ora_inizio ? st.ora_inizio.substring(0, 5) : '';
-            document.getElementById('lbl_ora_fine').innerText = st.ora_fine ? st.ora_fine.substring(0, 5) : '';
-            document.getElementById('lbl_tot_ore').innerText = st.totale_ore || '1.00';
-            document.getElementById('lbl_motivazione').innerText = st.motivazione || '';
-            document.getElementById('lbl_data_firma').innerText = dataInizioStr;
 
-            window.scrollTo(0, 0);
+            const formatDataIt = (dStr) => {
+                if (!dStr) return '---';
+                const p = dStr.split('-');
+                if (p.length === 3) return p[2] + '/' + p[1] + '/' + p[0];
+                return dStr;
+            };
+
+            document.getElementById('lbl_giorno_1').innerText = formatDataIt(st.data_straordinario);
+            document.getElementById('lbl_giorno_2').innerText = formatDataIt(st.data_fine_straordinario || st.data_straordinario);
+            document.getElementById('lbl_ora_inizio').innerText = st.ora_inizio ? st.ora_inizio.substring(0, 5) : '---';
+            document.getElementById('lbl_ora_fine').innerText = st.ora_fine ? st.ora_fine.substring(0, 5) : '---';
+            document.getElementById('lbl_tot_ore').innerText = st.totale_ore || '0';
+            document.getElementById('lbl_motivazione').innerText = st.motivazione || 'Nessuna motivazione specificata.';
         }
 
         function chiudiStampa() {
             document.getElementById('wrapperModuloStampa').style.display = 'none';
-            document.querySelector('.container.px-4').style.display = 'block';
+            document.querySelector('.container-fluid.px-4.no-print').style.display = 'block';
         }
     </script>
 </body>
