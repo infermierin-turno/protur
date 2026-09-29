@@ -89,20 +89,21 @@ function call_python_engine_genera($payload = []) {
     ];
 }
 
-// Estrazione sicura dell'ID utente, dell'organizzazione e del reparto dalla sessione
-$utente_id = $_SESSION['utente_id'] ?? $_SESSION['utente']['id'] ?? $_SESSION['utente']['ID'] ?? null;
-$org_id_utente = $_SESSION['organizzazione_id'] ?? $_SESSION['utente']['organizzazione_id'] ?? $_SESSION['utente']['ORGANIZZAZIONE_ID'] ?? null;
-$reparto_id_utente = $_SESSION['reparto_id'] ?? $_SESSION['utente']['reparto_id'] ?? $_SESSION['utente']['REPARTO_ID'] ?? null;
+// 1. Estrazione sicura dei dati dalla sessione
+$utente_id = $_SESSION['utente_id'] ?? $_SESSION['utente']['id'] ?? null;
+$org_id_utente = $_SESSION['organizzazione_id'] ?? $_SESSION['utente']['organizzazione_id'] ?? null;
+$reparto_id_utente = $_SESSION['reparto_id'] ?? $_SESSION['utente']['reparto_id'] ?? null;
 
-$ruolo_raw = trim($_SESSION['ruolo'] ?? $_SESSION['utente']['ruolo'] ?? $_SESSION['utente']['RUOLO'] ?? '');
+// Ruoli e permessi
+$ruolo_raw = trim($_SESSION['ruolo'] ?? $_SESSION['utente']['ruolo'] ?? '');
 $ruolo_lower = strtolower(str_replace([' ', '-'], '_', $ruolo_raw));
 
-$is_super_admin = $_SESSION['is_super_admin'] ?? false;
-if (!$is_super_admin && ($ruolo_lower === 'super_admin' || $ruolo_lower === 'admin' || $ruolo_lower === 'superadmin')) {
+$is_super_admin = $_SESSION['is_super_admin'] ?? $_SESSION['utente']['is_super_admin'] ?? false;
+if (!$is_super_admin && in_array($ruolo_lower, ['super_admin', 'admin', 'superadmin'])) {
     $is_super_admin = true;
 }
 
-$is_capo_personale = ($ruolo_lower === 'capo_personale' || $ruolo_lower === 'capopersonale');
+$is_capo_personale = in_array($ruolo_lower, ['capo_personale', 'capopersonale']);
 $is_coordinatore = ($ruolo_lower === 'coordinatore');
 
 if (empty($utente_id)) {
@@ -110,42 +111,55 @@ if (empty($utente_id)) {
     exit;
 }
 
-// Carichiamo sempre i dettagli freschi dell'utente corrente da Supabase per avere org_id e reparto_id certi
-$datiUserCurr = supabase_turni_request("staging_utenti?id=eq.$utente_id&select=id,organizzazione_id,reparto_id,ruolo");
-if (!empty($datiUserCurr) && is_array($datiUserCurr)) {
-    $uInfo = $datiUserCurr[0];
-    if (empty($org_id_utente) && !empty($uInfo['organizzazione_id'])) {
-        $org_id_utente = $uInfo['organizzazione_id'];
+// 2. Recupero di tutti i reparti per popolare il menu a tendina o riferimento
+$reparti_disponibili = [];
+$resReparti = supabase_turni_request("reparti?select=id,nome_reparto&order=nome_reparto.asc");
+if (is_array($resReparti) && !isset($resReparti['error'])) {
+    $reparti_disponibili = $resReparti;
+}
+
+// 3. Gestione Reparto Selezionato
+$reparto_selezionato = '';
+if ($is_super_admin || $is_capo_personale) {
+    if (isset($_GET['reparto_id']) && $_GET['reparto_id'] !== '') {
+        $reparto_selezionato = $_GET['reparto_id'];
+    } elseif (!empty($reparto_id_utente)) {
+        $reparto_selezionato = $reparto_id_utente;
     }
-    if (empty($reparto_id_utente) && !empty($uInfo['reparto_id'])) {
-        $reparto_id_utente = $uInfo['reparto_id'];
+} else {
+    $reparto_selezionato = $reparto_id_utente;
+}
+
+// 4. Determinazione del nome del reparto e della struttura da mostrare a schermo
+$nome_reparto_selezionato = ($is_super_admin || ($is_capo_personale && $reparto_selezionato === '')) ? "Tutti i Reparti" : "Reparto non assegnato";
+$nome_struttura_corrente = "Azienda Sanitaria / Struttura";
+
+if (!empty($org_id_utente)) {
+    $res_org = supabase_turni_request('organizzazioni', 'GET');
+    // Cerca manualmente o tramite filtro se supportato
+    $res_org_filtered = supabase_turni_request("organizzazioni?id=eq.$org_id_utente&select=nome_struttura");
+    if (!empty($res_org_filtered) && is_array($res_org_filtered)) {
+        $nome_struttura_corrente = $res_org_filtered[0]['nome_struttura'] ?? $res_org_filtered[0]['NOME_STRUTTURA'] ?? 'Azienda Sanitaria';
     }
 }
 
-// Recuperiamo le tabelle di riferimento per mappare i nomi descrittivi di Strutture e Reparti
-$mappaNomiOrganizzazioni = [];
-$resOrg = supabase_turni_request("organizzazioni?select=id,nome");
-if (is_array($resOrg)) {
-    foreach ($resOrg as $o) {
-        $mappaNomiOrganizzazioni[$o['id']] = $o['nome'];
+if ($reparto_selezionato !== '') {
+    foreach ($reparti_disponibili as $rep) {
+        if ((string)$rep['id'] === (string)$reparto_selezionato) {
+            $nome_reparto_selezionato = $rep['nome_reparto'] ?? $rep['nome'] ?? 'Reparto';
+            break;
+        }
+    }
+    if ($nome_reparto_selezionato === "Reparto non assegnato") {
+        $resSingleRep = supabase_turni_request("reparti?id=eq." . urlencode($reparto_selezionato) . "&select=nome_reparto");
+        if (is_array($resSingleRep) && count($resSingleRep) > 0) {
+            $nome_reparto_selezionato = $resSingleRep[0]['nome_reparto'] ?? $resSingleRep[0]['nome'] ?? 'Reparto';
+        }
     }
 }
-
-$mappaNomiReparti = [];
-$resRep = supabase_turni_request("reparti?select=id,nome");
-if (is_array($resRep)) {
-    foreach ($resRep as $r) {
-        $mappaNomiReparti[$r['id']] = $r['nome'];
-    }
-}
-
-// Se il reparto è associato ma il nome non è ancora in mappa, proviamo a cercarlo o a ricavarlo
-$nomeStrutturaCorrente = $org_id_utente && isset($mappaNomiOrganizzazioni[$org_id_utente]) ? $mappaNomiOrganizzazioni[$org_id_utente] : ($is_super_admin ? 'Tutte le Strutture (Super Admin)' : 'Struttura Principale');
-$nomeRepartoCorrente = $reparto_id_utente && isset($mappaNomiReparti[$reparto_id_utente]) ? $mappaNomiReparti[$reparto_id_utente] : ($is_capo_personale ? 'Tutti i Reparti della Struttura' : 'Reparto Assegnato');
 
 $messaggio = '';
 $tipo_alert = '';
-$debug_log = []; 
 
 $queryTipologie = "tipologie_turno?select=*";
 $tipologieTurni = supabase_turni_request($queryTipologie);
@@ -164,7 +178,7 @@ if (!is_array($tipologieTurni) || empty($tipologieTurni)) {
 $mappaColoriTurni = [];
 $mappaOrariTurni = [];
 foreach ($tipologieTurni as $t) {
-    $codice = $t['codice_breve'] ?? '';
+    $codice = strtoupper(trim($t['codice_breve'] ?? ''));
     $coloreHex = $t['colore'] ?? $t['colore_hex'] ?? $t['color'] ?? '#6c757d';
     if (!empty($codice)) {
         $mappaColoriTurni[$codice] = $coloreHex;
@@ -179,8 +193,6 @@ if (!isset($mappaColoriTurni['F'])) {
 }
 
 function verificaVincoliTurno($utente_id, $data_str, $nuovo_codice, $turno_escludere_id = null) {
-    global $mappaOrariTurni, $debug_log;
-    
     $inizioGiorno = $data_str . ' 00:00:00';
     $fineGiorno = $data_str . ' 23:59:59';
     $urlGiorno = "pianificazione?utente_id=eq.$utente_id&data_inizio=gte." . urlencode($inizioGiorno) . "&data_inizio=lte." . urlencode($fineGiorno) . "&select=*";
@@ -219,55 +231,21 @@ function verificaVincoliTurno($utente_id, $data_str, $nuovo_codice, $turno_esclu
     return true;
 }
 
-// COSTRUZIONE SICURA DELLA MAPPA UTENTI IN BASE AI RUOLI E MULTI-TENANT
+// COSTRUZIONE MAPPA UTENTI CON FILTRO MULTI-TENANT E REPARTO
 $mappaUtenti = [];
+$resCollab = supabase_turni_request("staging_utenti?select=id,nome,ruolo,qualifica,reparto_id,squadra&order=nome.asc");
 
-if ($is_super_admin) {
-    $resCollabAll = supabase_turni_request("staging_utenti?select=id,nome,ruolo,organizzazione_id,reparto_id,squadra&order=nome.asc");
-    if (is_array($resCollabAll)) {
-        foreach ($resCollabAll as $c) {
-            $rC_low = strtolower(str_replace([' ', '-'], '_', $c['ruolo'] ?? ''));
-            if ($rC_low === 'super_admin' || $rC_low === 'admin' || $rC_low === 'superadmin' || $rC_low === 'capo_personale' || $rC_low === 'capopersonale') {
-                continue;
-            }
-            $mappaUtenti[$c['id']] = $c;
+if (is_array($resCollab) && !isset($resCollab['error'])) {
+    foreach ($resCollab as $c) {
+        $rC_low = strtolower(str_replace([' ', '-'], '_', $c['ruolo'] ?? ''));
+        if (in_array($rC_low, ['super_admin', 'admin', 'superadmin', 'capo_personale', 'capopersonale'])) {
+            continue;
         }
-    }
-} elseif ($is_capo_personale && !empty($org_id_utente)) {
-    $resCollabOrg = supabase_turni_request("staging_utenti?organizzazione_id=eq." . urlencode($org_id_utente) . "&select=id,nome,ruolo,organizzazione_id,reparto_id,squadra&order=nome.asc");
-    if (is_array($resCollabOrg)) {
-        foreach ($resCollabOrg as $c) {
-            $rC_low = strtolower(str_replace([' ', '-'], '_', $c['ruolo'] ?? ''));
-            if ($rC_low === 'super_admin' || $rC_low === 'admin' || $rC_low === 'superadmin' || $rC_low === 'capo_personale' || $rC_low === 'capopersonale') {
-                continue;
-            }
-            $mappaUtenti[$c['id']] = $c;
+        $repCollabId = $c['reparto_id'] ?? '';
+        if (!$is_super_admin && $reparto_selezionato !== '' && (string)$repCollabId !== (string)$reparto_selezionato) {
+            continue;
         }
-    }
-} elseif ($is_coordinatore && !empty($reparto_id_utente)) {
-    $resCollabReparto = supabase_turni_request("staging_utenti?reparto_id=eq." . urlencode($reparto_id_utente) . "&select=id,nome,ruolo,organizzazione_id,reparto_id,squadra&order=nome.asc");
-    if (is_array($resCollabReparto)) {
-        foreach ($resCollabReparto as $c) {
-            $rC_low = strtolower(str_replace([' ', '-'], '_', $c['ruolo'] ?? ''));
-            if ($rC_low === 'super_admin' || $rC_low === 'admin' || $rC_low === 'superadmin' || $rC_low === 'capo_personale' || $rC_low === 'capopersonale') {
-                continue;
-            }
-            $mappaUtenti[$c['id']] = $c;
-        }
-    }
-}
-
-// Fallback di sicurezza: se la mappa è vuota ma non siamo super admin, carichiamo per organizzazione o reparto se disponibili
-if (empty($mappaUtenti) && !empty($org_id_utente)) {
-    $resCollabOrgFallback = supabase_turni_request("staging_utenti?organizzazione_id=eq." . urlencode($org_id_utente) . "&select=id,nome,ruolo,organizzazione_id,reparto_id,squadra&order=nome.asc");
-    if (is_array($resCollabOrgFallback)) {
-        foreach ($resCollabOrgFallback as $c) {
-            $rC_low = strtolower(str_replace([' ', '-'], '_', $c['ruolo'] ?? ''));
-            if ($rC_low === 'super_admin' || $rC_low === 'admin' || $rC_low === 'superadmin' || $rC_low === 'capo_personale' || $rC_low === 'capopersonale') {
-                continue;
-            }
-            $mappaUtenti[$c['id']] = $c;
-        }
+        $mappaUtenti[$c['id']] = $c;
     }
 }
 
@@ -426,10 +404,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-$mese_selezionato = trim($_GET['mese_tabellone'] ?? date('Y-m'));
-$primo_giorno_tab = $mese_selezionato . '-01';
-$ultimo_giorno_tab = date('Y-m-t', strtotime($primo_giorno_tab));
-$giorni_nel_mese = intval(date('t', strtotime($primo_giorno_tab)));
+$mese_selezionato = isset($_GET['mese']) ? intval($_GET['mese']) : intval(date('m'));
+$anno_selezionato = isset($_GET['anno']) ? intval($_GET['anno']) : intval(date('Y'));
+$giorni_nel_mese = cal_days_in_month(CAL_GREGORIAN, $mese_selezionato, $anno_selezionato);
+$primo_giorno_tab = sprintf('%04d-%02d-01', $anno_selezionato, $mese_selezionato);
+$ultimo_giorno_tab = sprintf('%04d-%02d-%d', $anno_selezionato, $mese_selezionato, $giorni_nel_mese);
 
 $queryTurniMese = "pianificazione?select=*&data_inizio=gte." . $primo_giorno_tab . "&data_inizio=lte." . $ultimo_giorno_tab;
 if (!empty($idsUtentiReparto)) {
@@ -498,6 +477,9 @@ if (is_array($assenzeMeseData)) {
         }
     }
 }
+
+$mesiNomi = [1=>'Gennaio', 2=>'Febbraio', 3=>'Marzo', 4=>'Aprile', 5=>'Maggio', 6=>'Giugno', 7=>'Luglio', 8=>'Agosto', 9=>'Settembre', 10=>'Ottobre', 11=>'Novembre', 12=>'Dicembre'];
+$nomeMeseCorrente = $mesiNomi[$mese_selezionato] ?? '';
 ?>
 <!DOCTYPE html>
 <html lang="it">
@@ -508,15 +490,15 @@ if (is_array($assenzeMeseData)) {
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
     <style>
-        body { background-color: #f4f7f6; padding-bottom: 70px; }
-        .card { border: none; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); }
-        .table-turni th, .table-turni td { text-align: center; vertical-align: middle; font-size: 0.85rem; padding: 6px 4px; }
+        body { background-color: #f8fafc; padding-bottom: 70px; color: #334155; }
+        .card { border: none; border-radius: 10px; box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.05); background: #ffffff; }
+        .table-turni th, .table-turni td { text-align: center; vertical-align: middle; font-size: 0.75rem; padding: 6px 4px; }
         .cella-interattiva { cursor: pointer; transition: background-color 0.2s; white-space: nowrap; }
         .cella-interattiva:hover { background-color: #e2e6ea !important; font-weight: bold; }
-        .col-operatore-sticky { position: sticky; left: 0; background-color: #ffffff; z-index: 2; text-align: left !important; min-width: 170px; font-weight: 600; }
+        .col-operatore-sticky { position: sticky; left: 0; background-color: #ffffff; z-index: 2; text-align: left !important; min-width: 170px; font-weight: 600; padding-left: 8px !important; }
         .badge-turno {
-            display: inline-block; padding: 0.25em 0.5em; font-size: 0.75rem; font-weight: 700; color: #fff;
-            border-radius: 0.35rem; margin: 0 1px; text-shadow: 0 1px 1px rgba(0,0,0,0.2);
+            display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 20px; font-size: 0.65rem; font-weight: 700; color: #fff;
+            border-radius: 4px; margin: 0 auto; box-shadow: 0 1px 2px rgba(0,0,0,0.05);
         }
         .badge-in-attesa {
             border: 2px dashed #ffc107 !important;
@@ -524,15 +506,16 @@ if (is_array($assenzeMeseData)) {
         }
     </style>
 </head>
-<body class="bg-light">
+<body>
 
     <nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-4">
         <div class="container-fluid">
-            <a class="navbar-brand fw-bold" href="dashboard.php">PRO-TUR | Gestione Turni Ospedalieri</a>
+            <a class="navbar-brand fw-bold" href="dashboard.php"><i class="bi bi-hospital"></i> PRO-TUR | Gestione Turni Ospedalieri</a>
             <div class="collapse navbar-collapse" id="navbarNav">
                 <ul class="navbar-nav ms-auto">
                     <li class="nav-item"><a class="nav-link" href="dashboard.php">Dashboard</a></li>
-                    <li class="nav-item"><a class="nav-link active" href="planner.php">Vai a Planner</a></li>
+                    <li class="nav-item"><a class="nav-link" href="planner.php">Planner Mensile</a></li>
+                    <li class="nav-item"><a class="nav-link active" href="turni.php">Assegnazione Turni</a></li>
                     <li class="nav-item"><a class="nav-link text-danger" href="logout.php">Logout</a></li>
                 </ul>
             </div>
@@ -540,41 +523,60 @@ if (is_array($assenzeMeseData)) {
     </nav>
 
     <div class="container-fluid px-4">
-        <div class="d-flex justify-content-between align-items-center flex-wrap gap-3 mb-3">
-            <h2 class="fw-bold mb-0">Assegnazione e Gestione Turni</h2>
-            <!-- Box informativo in alto con Struttura e Reparto -->
-            <div class="d-flex gap-2">
-                <div class="bg-white px-3 py-2 rounded shadow-sm border d-flex align-items-center gap-2">
-                    <i class="bi bi-hospital text-primary fs-5"></i>
-                    <div>
-                        <div style="font-size: 0.7rem;" class="text-muted text-uppercase fw-bold">Struttura</div>
-                        <div class="small fw-bold text-dark"><?php echo htmlspecialchars($nomeStrutturaCorrente); ?></div>
-                    </div>
+        
+        <!-- Header con Titolo e Box Reparto / Struttura in alto -->
+        <div class="card shadow-sm mb-4 p-3">
+            <div class="row align-items-center g-3">
+                <div class="col-md-6">
+                    <h2 class="mb-1 fw-bold text-dark d-flex align-items-center gap-2">
+                        <i class="bi bi-calendar-check text-primary"></i> Assegnazione e Gestione Turni
+                    </h2>
+                    <span class="small text-muted">
+                        <i class="bi bi-building"></i> Struttura: <strong class="text-dark"><?php echo htmlspecialchars($nome_struttura_corrente); ?></strong> | 
+                        Reparto: <strong class="text-dark"><?php echo htmlspecialchars($nome_reparto_selezionato); ?></strong>
+                    </span>
                 </div>
-                <div class="bg-white px-3 py-2 rounded shadow-sm border d-flex align-items-center gap-2">
-                    <i class="bi bi-door-open text-success fs-5"></i>
-                    <div>
-                        <div style="font-size: 0.7rem;" class="text-muted text-uppercase fw-bold">Reparto</div>
-                        <div class="small fw-bold text-dark"><?php echo htmlspecialchars($nomeRepartoCorrente); ?></div>
-                    </div>
+                <div class="col-md-6 text-md-end">
+                    <form method="GET" action="turni.php" class="d-inline-flex gap-2 align-items-center">
+                        <?php if (($is_super_admin || $is_capo_personale) && !empty($reparti_disponibili)) { ?>
+                            <select name="reparto_id" class="form-select form-select-sm" onchange="this.form.submit()">
+                                <option value="">Tutti i Reparti</option>
+                                <?php foreach ($reparti_disponibili as $rep) { 
+                                    $labelRep = $rep['nome_reparto'] ?? $rep['nome'] ?? 'Reparto';
+                                ?>
+                                    <option value="<?php echo $rep['id']; ?>" <?php echo ($reparto_selezionato !== '' && (string)$rep['id'] === (string)$reparto_selezionato) ? 'selected' : ''; ?>><?php echo htmlspecialchars($labelRep); ?></option>
+                                <?php } ?>
+                            </select>
+                        <?php } ?>
+                        <select name="mese" class="form-select form-select-sm" onchange="this.form.submit()">
+                            <?php foreach ($mesiNomi as $numM => $strM) { ?>
+                                <option value="<?php echo $numM; ?>" <?php echo ($numM === $mese_selezionato) ? 'selected' : ''; ?>><?php echo $strM; ?></option>
+                            <?php } ?>
+                        </select>
+                        <select name="anno" class="form-select form-select-sm" onchange="this.form.submit()">
+                            <?php for ($a = 2024; $a <= 2030; $a++) { ?>
+                                <option value="<?php echo $a; ?>" <?php echo ($a === $anno_selezionato) ? 'selected' : ''; ?>><?php echo $a; ?></option>
+                            <?php } ?>
+                        </select>
+                    </form>
                 </div>
             </div>
         </div>
 
         <?php if (!empty($messaggio)) { ?>
-            <div class="alert alert-<?php echo $tipo_alert; ?> py-2 small" role="alert">
+            <div class="alert alert-<?php echo $tipo_alert; ?> py-2 small shadow-sm" role="alert">
                 <?php echo htmlspecialchars($messaggio); ?>
             </div>
         <?php } ?>
 
         <div class="row mb-4">
             <div class="col-lg-6 mb-3 mb-lg-0">
-                <div class="card h-100 bg-white">
-                    <div class="card-header bg-white py-3">
+                <div class="card h-100 bg-white p-3">
+                    <div class="card-header bg-white pb-2 px-0 border-bottom">
                         <h5 class="mb-0 fs-6 fw-bold"><i class="bi bi-person-plus-fill"></i> Assegnazione Singola Manuale</h5>
                     </div>
-                    <div class="card-body">
-                        <form method="POST" action="turni.php">
+                    <div class="card-body px-0">
+                        <form method="POST" action="turni.php?mese=<?php echo $mese_selezionato; ?>&anno=<?php echo $anno_selezionato; ?>&reparto_id=<?php echo $reparto_selezionato; ?>">
                             <input type="hidden" name="azione" value="assegna_turno">
                             <div class="mb-2">
                                 <label class="form-label small fw-bold">Collaboratore</label>
@@ -582,7 +584,7 @@ if (is_array($assenzeMeseData)) {
                                     <option value="">-- Seleziona collaboratore --</option>
                                     <?php foreach ($listaCollaboratori as $collab) { ?>
                                         <option value="<?php echo htmlspecialchars($collab['id']); ?>">
-                                            <?php echo htmlspecialchars($collab['nome']); ?> (<?php echo htmlspecialchars($collab['ruolo'] ?? 'N/D'); ?>)
+                                            <?php echo htmlspecialchars($collab['nome']); ?> (<?php echo htmlspecialchars($collab['ruolo'] ?? $collab['qualifica'] ?? 'N/D'); ?>)
                                         </option>
                                     <?php } ?>
                                 </select>
@@ -615,12 +617,12 @@ if (is_array($assenzeMeseData)) {
             </div>
 
             <div class="col-lg-6">
-                <div class="card h-100 bg-white">
-                    <div class="card-header bg-white py-3">
+                <div class="card h-100 bg-white p-3">
+                    <div class="card-header bg-white pb-2 px-0 border-bottom">
                         <h5 class="mb-0 fs-6 fw-bold"><i class="bi bi-cpu-fill text-primary"></i> Generazione Automatica Turni (AI Ad Personam)</h5>
                     </div>
-                    <div class="card-body">
-                        <form method="POST" action="turni.php">
+                    <div class="card-body px-0">
+                        <form method="POST" action="turni.php?mese=<?php echo $mese_selezionato; ?>&anno=<?php echo $anno_selezionato; ?>&reparto_id=<?php echo $reparto_selezionato; ?>">
                             <input type="hidden" name="azione" value="genera_turni_ai">
                             
                             <div class="mb-2">
@@ -629,7 +631,7 @@ if (is_array($assenzeMeseData)) {
                                     <option value="">-- Tutti i collaboratori abilitati --</option>
                                     <?php foreach ($listaCollaboratori as $collab) { ?>
                                         <option value="<?php echo htmlspecialchars($collab['id']); ?>">
-                                            <?php echo htmlspecialchars($collab['nome']); ?> (<?php echo htmlspecialchars($collab['ruolo'] ?? 'N/D'); ?>)
+                                            <?php echo htmlspecialchars($collab['nome']); ?> (<?php echo htmlspecialchars($collab['ruolo'] ?? $collab['qualifica'] ?? 'N/D'); ?>)
                                         </option>
                                     <?php } ?>
                                 </select>
@@ -676,17 +678,21 @@ if (is_array($assenzeMeseData)) {
             </div>
         </div>
 
-        <div class="card shadow-sm mb-4 bg-white">
-            <div class="card-body py-2 px-3 d-flex flex-wrap align-items-center gap-3">
+        <div class="card shadow-sm mb-4 bg-white p-3">
+            <div class="d-flex align-items-center flex-wrap gap-3">
                 <span class="small fw-bold text-muted"><i class="bi bi-info-circle"></i> Legenda Turni:</span>
-                <?php foreach ($tipologieTurni as $t): ?>
+                <?php foreach ($tipologieTurni as $t): 
+                    $cBreve = strtoupper(trim($t['codice_breve'] ?? ''));
+                    $nTurno = $t['nome_turno'] ?? $cBreve;
+                    $colHex = $t['colore'] ?? '#6c757d';
+                ?>
                     <div class="d-flex align-items-center gap-1">
-                        <span class="badge-turno" style="background-color: <?php echo htmlspecialchars($t['colore'] ?? '#6c757d'); ?>;"><?php echo htmlspecialchars($t['codice_breve']); ?></span>
-                        <span class="small text-secondary"><?php echo htmlspecialchars($t['nome_turno']); ?></span>
+                        <span class="badge-turno" style="background-color: <?php echo htmlspecialchars($colHex); ?>;"><?php echo htmlspecialchars($cBreve); ?></span>
+                        <span class="small text-secondary"><?php echo htmlspecialchars($nTurno); ?></span>
                     </div>
                 <?php endforeach; ?>
                 <div class="d-flex align-items-center gap-1 ms-3 border-start ps-3">
-                    <span class="badge-turno badge-in-attesa bg-secondary">F/N</span>
+                    <span class="badge-turno badge-in-attesa bg-secondary">F</span>
                     <span class="small text-secondary">Bordo tratteggiato = In attesa di approvazione</span>
                 </div>
             </div>
@@ -694,24 +700,24 @@ if (is_array($assenzeMeseData)) {
 
         <div class="card shadow-sm bg-white mb-5">
             <div class="card-header bg-white py-3 d-flex justify-content-between align-items-center flex-wrap gap-2">
-                <h5 class="mb-0 fs-6 fw-bold"><i class="bi bi-table"></i> Tabellone Turni Mensile</h5>
-                <form method="GET" action="turni.php" class="d-flex align-items-center gap-2">
-                    <label class="small fw-bold text-muted mb-0">Mese:</label>
-                    <input type="month" name="mese_tabellone" class="form-control form-control-sm" value="<?php echo htmlspecialchars($mese_selezionato); ?>" onchange="this.form.submit()">
-                </form>
+                <h5 class="mb-0 fs-6 fw-bold"><i class="bi bi-table"></i> Tabellone Turni Mensile (<?php echo "$nomeMeseCorrente $anno_selezionato"; ?>)</h5>
             </div>
             <div class="card-body p-0">
                 <div class="table-responsive">
                     <table class="table table-bordered table-turni mb-0">
                         <thead class="table-dark">
                             <tr>
-                                <th class="col-operatore-sticky bg-dark text-white">Operatore</th>
+                                <th class="col-operatore-sticky bg-dark text-white">Collaboratore</th>
                                 <?php for ($g = 1; $g <= $giorni_nel_mese; $g++): 
-                                    $giornoStamp = sprintf('%s-%02d', $mese_selezionato, $g);
-                                    $numGiornoSettimana = date('N', strtotime($giornoStamp));
+                                    $timestampGiorno = mktime(0, 0, 0, $mese_selezionato, $g, $anno_selezionato);
+                                    $numGiornoSettimana = date('N', $timestampGiorno);
+                                    $letteraGiorno = ['1'=>'L', '2'=>'M', '3'=>'M', '4'=>'G', '5'=>'V', '6'=>'S', '7'=>'D'][$numGiornoSettimana];
                                     $isFestivo = ($numGiornoSettimana == 7); // Domenica
                                 ?>
-                                    <th class="<?php echo $isFestivo ? 'bg-danger text-white' : ''; ?>"><?php echo $g; ?></th>
+                                    <th class="<?php echo $isFestivo ? 'bg-danger text-white' : ''; ?>">
+                                        <div><?php echo $g; ?></div>
+                                        <div style="font-size: 0.55rem; opacity: 0.8;"><?php echo $letteraGiorno; ?></div>
+                                    </th>
                                 <?php endfor; ?>
                             </tr>
                         </thead>
@@ -719,27 +725,29 @@ if (is_array($assenzeMeseData)) {
                             <?php if (empty($listaCollaboratori)) { ?>
                                 <tr>
                                     <td colspan="<?php echo $giorni_nel_mese + 1; ?>" class="text-center py-4 text-muted">
-                                        Nessun collaboratore trovato per la tua struttura o reparto.
+                                        Nessun collaboratore trovato per la struttura o reparto selezionato.
                                     </td>
                                 </tr>
                             <?php } else { ?>
                                 <?php foreach ($listaCollaboratori as $collab) { 
                                     $uId = $collab['id'];
+                                    $nomeCollab = $collab['nome'] ?? 'Utente';
+                                    $qualificaCollab = trim($collab['qualifica'] ?? '') !== '' ? $collab['qualifica'] : ($collab['ruolo'] ?? '');
                                 ?>
                                     <tr>
                                         <td class="col-operatore-sticky">
-                                            <div class="text-truncate" style="max-width: 170px;" title="<?php echo htmlspecialchars($collab['nome']); ?>">
-                                                <?php echo htmlspecialchars($collab['nome']); ?>
+                                            <div class="text-truncate fw-bold text-dark" style="max-width: 170px; font-size: 0.78rem;" title="<?php echo htmlspecialchars($nomeCollab); ?>">
+                                                <?php echo htmlspecialchars($nomeCollab); ?>
                                             </div>
-                                            <div style="font-size: 0.7rem; font-weight: normal; color: #6c757d;">
-                                                <?php echo htmlspecialchars($collab['ruolo'] ?? 'N/D'); ?>
+                                            <div style="font-size: 0.62rem; color: #6c757d;" class="text-truncate">
+                                                <?php echo htmlspecialchars($qualificaCollab); ?>
                                             </div>
                                         </td>
                                         <?php for ($g = 1; $g <= $giorni_nel_mese; $g++): 
-                                            $giornoStamp = sprintf('%s-%02d', $mese_selezionato, $g);
+                                            $giornoStamp = sprintf('%04d-%02d-%02d', $anno_selezionato, $mese_selezionato, $g);
                                             $turniGiornoCell = $mappaTurniGriglia[$uId][$g] ?? [];
                                         ?>
-                                            <td class="cella-interattiva" onclick="apriModaleCella('<?php echo $uId; ?>', '<?php echo htmlspecialchars($collab['nome']); ?>', '<?php echo $giornoStamp; ?>', '<?php echo htmlspecialchars(json_encode($turniGiornoCell), ENT_QUOTES, 'UTF-8'); ?>')">
+                                            <td class="cella-interattiva" onclick="apriModaleCella('<?php echo $uId; ?>', '<?php echo htmlspecialchars($nomeCollab); ?>', '<?php echo $giornoStamp; ?>', '<?php echo htmlspecialchars(json_encode($turniGiornoCell), ENT_QUOTES, 'UTF-8'); ?>')">
                                                 <?php if (!empty($turniGiornoCell)) { 
                                                     foreach ($turniGiornoCell as $ev) {
                                                         $codEv = strtoupper(trim($ev['tipo_evento']));
@@ -753,7 +761,7 @@ if (is_array($assenzeMeseData)) {
                                                 <?php 
                                                     }
                                                 } else { ?>
-                                                    <span class="text-muted" style="opacity: 0.3;">-</span>
+                                                    <span class="text-muted opacity-25" style="font-size: 0.6rem;">·</span>
                                                 <?php } ?>
                                             </td>
                                         <?php endfor; ?>
@@ -772,7 +780,7 @@ if (is_array($assenzeMeseData)) {
     <div class="modal fade" id="modaleCella" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog">
             <div class="modal-content">
-                <form method="POST" action="turni.php">
+                <form method="POST" action="turni.php?mese=<?php echo $mese_selezionato; ?>&anno=<?php echo $anno_selezionato; ?>&reparto_id=<?php echo $reparto_selezionato; ?>">
                     <div class="modal-header">
                         <h5 class="modal-title fs-6 fw-bold" id="titoloModaleCella">Gestione Turno Giorno</h5>
                         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Chiudi"></button>
