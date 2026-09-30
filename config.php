@@ -6,7 +6,7 @@ if (session_status() === PHP_SESSION_NONE) {
 
 // Configurazione Supabase
 define('SUPABASE_URL', 'https://cfrsuknofgywvznjhqvp.supabase.co');
-define('SUPABASE_KEY', 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNmcnN1a25vZmd5d3Z6bmpocXZwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA5OTI1NjMsImV4cCI6MjA5NjU2ODU2M30.udFkfESJsJKdho5vhJR-MdgpIYby9uqMWRsZtymbv0Y');
+define('SUPABASE_KEY', 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNmcnN1a25vZmd5d3Z6bmpocXZwIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4MDk5MjU2MywiZXhwIjoyMDk2NTY4NTYzfQ.nmwml2Kw2wZcJfYe8DaNLN3a2befbmAOH-OcL3NwIVY');
 
 /**
  * Funzione centralizzata per le chiamate REST a Supabase tramite cURL
