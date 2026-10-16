@@ -49,7 +49,7 @@ function supabase_turni_request($endpoint, $method = 'GET', $data = null) {
     return $method === 'GET' ? [] : false;
 }
 
-// Funzione per comunicare con il microservizio Python su Render
+// Funzione per comunicare con il microservizio Python su Render (con tracciamento debug)
 function call_python_engine_genera($payload = []) {
     $url = 'https://turno-med-engine.onrender.com/genera-turni';
 
@@ -68,6 +68,10 @@ function call_python_engine_genera($payload = []) {
     $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     $error = curl_error($ch);
     curl_close($ch);
+
+    // Salviamo in sessione per il debug visivo
+    $_SESSION['debug_payload_inviato'] = json_encode($payload, JSON_PRETTY_PRINT);
+    $_SESSION['debug_risposta_ricevuta'] = "HTTP Code: $httpCode \nRisposta: " . $response;
 
     if ($error) {
         return ['success' => false, 'error' => "Errore cURL: " . $error];
@@ -236,17 +240,15 @@ function verificaVincoliTurno($utente_id, $data_str, $nuovo_codice, $turno_esclu
     return true;
 }
 
-// COSTRUZIONE MAPPA UTENTI CON ISOLAMENTO MULTI-TENANT RIGOROSO DALLA TABELLA staging_utenti
+// COSTRUZIONE MAPPA UTENTI DALLA TABELLA staging_utenti
 $mappaUtenti = [];
 
 if ($is_super_admin) {
-    // Super admin vede tutti
     $urlUtenti = "staging_utenti?select=id,nome,ruolo,qualifica,organizzazione_id,reparto_id,squadra&order=nome.asc";
     if ($reparto_selezionato !== '') {
         $urlUtenti = "staging_utenti?reparto_id=eq." . urlencode($reparto_selezionato) . "&select=id,nome,ruolo,qualifica,organizzazione_id,reparto_id,squadra&order=nome.asc";
     }
 } elseif ($is_capo_personale) {
-    // Capo Personale: FILTRO TASSATIVO SULL'ORGANIZZAZIONE_ID
     if (!empty($org_id_utente)) {
         if ($reparto_selezionato !== '') {
             $urlUtenti = "staging_utenti?organizzazione_id=eq.$org_id_utente&reparto_id=eq." . urlencode($reparto_selezionato) . "&select=id,nome,ruolo,qualifica,organizzazione_id,reparto_id,squadra&order=nome.asc";
@@ -257,7 +259,6 @@ if ($is_super_admin) {
         $urlUtenti = "";
     }
 } else {
-    // Coordinatore o altro ruolo: filtra per reparto
     if (!empty($reparto_id_utente)) {
         $urlUtenti = "staging_utenti?reparto_id=eq.$reparto_id_utente&select=id,nome,ruolo,qualifica,organizzazione_id,reparto_id,squadra&order=nome.asc";
     } else {
@@ -396,7 +397,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
-    // GENERAZIONE TURNI CON MOTORE AI PYTHON (CORRETTO PER PASSAGGIO ESPLICITO OPERATORI)
+    // GENERAZIONE TURNI CON MOTORE AI PYTHON (CON DEBUG DETTAGLIATO)
     if ($azione === 'genera_turni_ai') {
         $data_inizio_gen = trim($_POST['data_inizio_gen'] ?? '');
         $data_fine_gen = trim($_POST['data_fine_gen'] ?? '');
@@ -408,7 +409,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $clean_org_id = (!empty($org_id_utente)) ? $org_id_utente : null;
             $clean_rep_id = (!empty($reparto_selezionato)) ? $reparto_selezionato : null;
             
-            // Selezioniamo gli operatore_ids: se l'utente ha scelto un operatore inviamo solo lui, altrimenti inviamo l'intero array degli utenti trovati in reparto
             $operatori_target = [];
             if (!empty($collaboratore_gen) && isset($mappaUtenti[$collaboratore_gen])) {
                 $operatori_target = [$collaboratore_gen];
@@ -420,6 +420,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $messaggio = "Nessun operatore disponibile in reparto o con i filtri selezionati.";
                 $tipo_alert = "danger";
             } else {
+                // Inviamo tutti i possibili formati di chiave che il backend Python potrebbe attendersi
                 $payloadAI = [
                     'organizzazione_id' => $clean_org_id,
                     'reparto_id' => $clean_rep_id,
@@ -567,6 +568,23 @@ $nomeMeseCorrente = $mesiNomi[$mese_selezionato] ?? '';
 
     <div class="container-fluid px-4">
         
+        <!-- BOX DI DEBUG VISIVO (Utile per capire cosa viene spedito all'AI) -->
+        <?php if (isset($_SESSION['debug_payload_inviato'])) { ?>
+            <div class="card bg-dark text-light mb-4 p-3 shadow">
+                <h6 class="text-warning fw-bold"><i class="bi bi-bug-fill"></i> Pannello Debug Ultima Chiamata AI</h6>
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <small class="text-muted d-block">Payload Inviato a Render:</small>
+                        <pre class="bg-black text-info p-2 rounded small" style="max-height: 150px; overflow-y:auto;"><?php echo htmlspecialchars($_SESSION['debug_payload_inviato']); ?></pre>
+                    </div>
+                    <div class="col-md-6">
+                        <small class="text-muted d-block">Risposta Ricevuta dal Motore:</small>
+                        <pre class="bg-black text-danger p-2 rounded small" style="max-height: 150px; overflow-y:auto;"><?php echo htmlspecialchars($_SESSION['debug_risposta_ricevuta']); ?></pre>
+                    </div>
+                </div>
+            </div>
+        <?php } ?>
+
         <!-- Header con Titolo e Box Reparto / Struttura in alto -->
         <div class="card shadow-sm mb-4 p-3">
             <div class="row align-items-center g-3">
@@ -736,7 +754,7 @@ $nomeMeseCorrente = $mesiNomi[$mese_selezionato] ?? '';
                                 <th class="col-operatore-sticky bg-light">OPERATORE</th>
                                 <?php for ($g = 1; $g <= $giorni_nel_mese; $g++) { 
                                     $timestampG = strtotime(sprintf('%04d-%02d-%02d', $anno_selezionato, $mese_selezionato, $g));
-                                    $giornoSettimanaStr = date('N', $timestampG); // 6=Sabato, 7=Domenica
+                                    $giornoSettimanaStr = date('N', $timestampG); 
                                     $isFestivoCol = ($giornoSettimanaStr >= 6);
                                 ?>
                                     <th class="<?php echo $isFestivoCol ? 'text-danger bg-light' : ''; ?>"><?php echo $g; ?><br><small style="font-size:0.55rem;"><?php echo ['1'=>'L','2'=>'M','3'=>'M','4'=>'G','5'=>'V','6'=>'S','7'=>'D'][$giornoSettimanaStr]; ?></small></th>
