@@ -236,7 +236,7 @@ function verificaVincoliTurno($utente_id, $data_str, $nuovo_codice, $turno_esclu
     return true;
 }
 
-// COSTRUZIONE MAPPA UTENTI CON ISOLAMENTO MULTI-TENANT RIGOROSO
+// COSTRUZIONE MAPPA UTENTI CON ISOLAMENTO MULTI-TENANT RIGOROSO DALLA TABELLA staging_utenti
 $mappaUtenti = [];
 
 if ($is_super_admin) {
@@ -246,7 +246,7 @@ if ($is_super_admin) {
         $urlUtenti = "staging_utenti?reparto_id=eq." . urlencode($reparto_selezionato) . "&select=id,nome,ruolo,qualifica,organizzazione_id,reparto_id,squadra&order=nome.asc";
     }
 } elseif ($is_capo_personale) {
-    // Capo Personale: FILTRO TASSATIVO SULL'ORGANIZZAZIONE_ID (Struttura A)
+    // Capo Personale: FILTRO TASSATIVO SULL'ORGANIZZAZIONE_ID
     if (!empty($org_id_utente)) {
         if ($reparto_selezionato !== '') {
             $urlUtenti = "staging_utenti?organizzazione_id=eq.$org_id_utente&reparto_id=eq." . urlencode($reparto_selezionato) . "&select=id,nome,ruolo,qualifica,organizzazione_id,reparto_id,squadra&order=nome.asc";
@@ -254,7 +254,7 @@ if ($is_super_admin) {
             $urlUtenti = "staging_utenti?organizzazione_id=eq.$org_id_utente&select=id,nome,ruolo,qualifica,organizzazione_id,reparto_id,squadra&order=nome.asc";
         }
     } else {
-        $urlUtenti = ""; // Nessuna organizzazione -> nessun utente
+        $urlUtenti = "";
     }
 } else {
     // Coordinatore o altro ruolo: filtra per reparto
@@ -396,6 +396,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
+    // GENERAZIONE TURNI CON MOTORE AI PYTHON (CORRETTO PER PASSAGGIO ESPLICITO OPERATORI)
     if ($azione === 'genera_turni_ai') {
         $data_inizio_gen = trim($_POST['data_inizio_gen'] ?? '');
         $data_fine_gen = trim($_POST['data_fine_gen'] ?? '');
@@ -406,28 +407,41 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!empty($data_inizio_gen) && !empty($data_fine_gen)) {
             $clean_org_id = (!empty($org_id_utente)) ? $org_id_utente : null;
             $clean_rep_id = (!empty($reparto_selezionato)) ? $reparto_selezionato : null;
-            $clean_user_id = (!empty($collaboratore_gen) && isset($mappaUtenti[$collaboratore_gen])) ? $collaboratore_gen : null;
-            $clean_turno_partenza = (!empty($turno_partenza)) ? $turno_partenza : null;
-
-            $payloadAI = [
-                'organizzazione_id' => $clean_org_id,
-                'reparto_id' => $clean_rep_id,
-                'data_inizio' => $data_inizio_gen,
-                'data_fine' => $data_fine_gen,
-                'utente_id' => $clean_user_id,
-                'turno_partenza' => $clean_turno_partenza,
-                'rispetta_ferie' => true,
-                'riposo_domenicale' => $riposo_domenicale 
-            ];
-
-            $risultatoAI = call_python_engine_genera($payloadAI);
-            if (isset($risultatoAI['success']) && $risultatoAI['success'] === true) {
-                $messaggio = "Generazione turni tramite AI completata con successo!";
-                $tipo_alert = "success";
+            
+            // Selezioniamo gli operatore_ids: se l'utente ha scelto un operatore inviamo solo lui, altrimenti inviamo l'intero array degli utenti trovati in reparto
+            $operatori_target = [];
+            if (!empty($collaboratore_gen) && isset($mappaUtenti[$collaboratore_gen])) {
+                $operatori_target = [$collaboratore_gen];
             } else {
-                $detErr = $risultatoAI['response'] ?? $risultatoAI['error'] ?? 'Sconosciuto';
-                $messaggio = "Errore dal motore AI: " . ($risultatoAI['error'] ?? 'Riconosciuto') . " | Dettaglio: " . htmlspecialchars($detErr);
+                $operatori_target = $idsUtentiReparto;
+            }
+
+            if (empty($operatori_target)) {
+                $messaggio = "Nessun operatore disponibile in reparto o con i filtri selezionati.";
                 $tipo_alert = "danger";
+            } else {
+                $payloadAI = [
+                    'organizzazione_id' => $clean_org_id,
+                    'reparto_id' => $clean_rep_id,
+                    'data_inizio' => $data_inizio_gen,
+                    'data_fine' => $data_fine_gen,
+                    'utente_id' => (!empty($collaboratore_gen)) ? $collaboratore_gen : null,
+                    'operatori_ids' => $operatori_target,
+                    'utenti_ids' => $operatori_target,
+                    'turno_partenza' => (!empty($turno_partenza)) ? $turno_partenza : null,
+                    'rispetta_ferie' => true,
+                    'riposo_domenicale' => $riposo_domenicale 
+                ];
+
+                $risultatoAI = call_python_engine_genera($payloadAI);
+                if (isset($risultatoAI['success']) && $risultatoAI['success'] === true) {
+                    $messaggio = "Generazione turni tramite AI completata con successo!";
+                    $tipo_alert = "success";
+                } else {
+                    $detErr = $risultatoAI['response'] ?? $risultatoAI['error'] ?? 'Sconosciuto';
+                    $messaggio = "Errore dal motore AI: " . ($risultatoAI['error'] ?? 'Riconosciuto') . " | Dettaglio: " . htmlspecialchars($detErr);
+                    $tipo_alert = "danger";
+                }
             }
         }
     }
@@ -761,7 +775,7 @@ $nomeMeseCorrente = $mesiNomi[$mese_selezionato] ?? '';
                                                             $coloreBg = $mappaColoriTurni[$codEv] ?? '#6c757d';
                                                             $isInAttesa = (strcasecmp($tc['stato'], 'In attesa') === 0);
                                                         ?>
-                                                            <span class="badge-turno <?php echo $isInAttesa ? 'badge-in-attesa' : ''; ?>" style="background-color: <?php echo $coloreBg; ?>;" title="<?php echo htmlspecialchars($tc['tipo_evento'] . ' (' .$tc['stato'] . ')'); ?>">
+                                                            <span class="badge-turno <?php echo $isInAttesa ? 'badge-in-attesa' : ''; ?>" style="background-color: <?php echo $coloreBg; ?>;" title="<?php echo htmlspecialchars($tc['tipo_evento'] . ' (' . $tc['stato'] . ')'); ?>">
                                                                 <?php echo htmlspecialchars($codEv); ?>
                                                             </span>
                                                         <?php } ?>
@@ -800,7 +814,7 @@ $nomeMeseCorrente = $mesiNomi[$mese_selezionato] ?? '';
                     <hr>
 
                     <h6 class="small fw-bold text-primary mb-2"><i class="bi bi-plus-circle"></i> Aggiungi o Modifica Turno in questa data</h6>
-                    <form id="formModaleCella" method="POST" action="turni.php?mese=<?php echo $mese_selezionato; ?>&anno=<?php echo $anno_selezionato; ?>&reparto_id=<?php echo$reparto_selezionato; ?>">
+                    <form id="formModaleCella" method="POST" action="turni.php?mese=<?php echo $mese_selezionato; ?>&anno=<?php echo $anno_selezionato; ?>&reparto_id=<?php echo $reparto_selezionato; ?>">
                         <input type="hidden" name="azione" id="modaleAzioneForm" value="aggiungi_turno_cella">
                         <input type="hidden" name="utente_id" id="modaleUtenteId">
                         <input type="hidden" name="data" id="modaleDataInput">
@@ -810,7 +824,7 @@ $nomeMeseCorrente = $mesiNomi[$mese_selezionato] ?? '';
                             <label class="form-label small fw-bold">Tipologia Turno</label>
                             <select class="form-select form-select-sm" name="valore" id="modaleValoreTurno" required>
                                 <option value="">-- Seleziona turno --</option>
-                                <?php foreach ($tipologieTurni as$t) { ?>
+                                <?php foreach ($tipologieTurni as $t) { ?>
                                     <option value="<?php echo htmlspecialchars($t['codice_breve']); ?>">
                                         <?php echo htmlspecialchars($t['nome_turno']); ?> (<?php echo htmlspecialchars($t['codice_breve']); ?>)
                                     </option>
@@ -838,7 +852,7 @@ $nomeMeseCorrente = $mesiNomi[$mese_selezionato] ?? '';
         function apriModaleCella(utenteId, nomeOperatore, dataStr, turniEsistenti) {
             document.getElementById('modaleUtenteId').value = utenteId;
             document.getElementById('modaleDataInput').value = dataStr;
-            document.getElementById('modaleNomeOperatoreinnerText' || 'modaleNomeOperatore').innerText = nomeOperatore;
+            document.getElementById('modaleNomeOperatore').innerText = nomeOperatore;
             document.getElementById('modaleDataVisualizzata').innerText = dataStr;
 
             const containerTurni = document.getElementById('modaleElencoTurniEsistenti');
